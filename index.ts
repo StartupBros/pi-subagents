@@ -83,19 +83,9 @@ function loadConfig(): ExtensionConfig {
 	return {};
 }
 
-interface SessionRootInput {
-	shareEnabled: boolean;
-	sessionDir?: string;
-	defaultSessionDir?: string;
+function expandTilde(p: string): string {
+	return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
 }
-
-export function resolveSessionRoot(input: SessionRootInput): string | undefined {
-	const { sessionDir, defaultSessionDir, shareEnabled } = input;
-	if (sessionDir) return path.resolve(sessionDir);
-	if (!shareEnabled && !defaultSessionDir) return undefined;
- 	if (defaultSessionDir) return path.resolve(defaultSessionDir);
- 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"));
- }
 
 /**
  * Create a directory and verify it is actually accessible.
@@ -316,10 +306,13 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 			// Sessions are always enabled - stored alongside parent session for tracking
 			// Include runId to ensure uniqueness across multiple subagent calls
 			const sessionRoot = params.sessionDir
-				? path.resolve(params.sessionDir)
-				: config.defaultSessionDir
-					? path.resolve(config.defaultSessionDir)
-					: path.join(getSubagentSessionRoot(parentSessionFile), runId);
+				? path.resolve(expandTilde(params.sessionDir))
+				: path.join(
+					config.defaultSessionDir
+						? path.resolve(expandTilde(config.defaultSessionDir))
+						: getSubagentSessionRoot(parentSessionFile),
+					runId,
+				);
 			try {
 				fs.mkdirSync(sessionRoot, { recursive: true });
 			} catch {}
