@@ -74,21 +74,37 @@ export async function mapConcurrent<T, R>(
 	return results;
 }
 
+export interface ParallelTaskResult {
+	agent: string;
+	taskIndex?: number;
+	output: string;
+	exitCode: number | null;
+	error?: string;
+	outputTargetPath?: string;
+	outputTargetExists?: boolean;
+}
+
 /** Aggregate outputs from parallel tasks into a single string for {previous} */
 export function aggregateParallelOutputs(
-	results: Array<{ agent: string; output: string; exitCode: number | null; error?: string }>,
+	results: ParallelTaskResult[],
+	headerFormat: (index: number, agent: string) => string = (i, agent) =>
+		`=== Parallel Task ${i + 1} (${agent}) ===`,
 ): string {
 	return results
 		.map((r, i) => {
-			const header = `=== Parallel Task ${i + 1} (${r.agent}) ===`;
+			const header = headerFormat(r.taskIndex ?? i, r.agent);
 			const hasOutput = Boolean(r.output?.trim());
 			const status =
 				r.exitCode === -1
 					? "⏭️ SKIPPED"
-					: r.exitCode !== 0
+					: r.exitCode !== 0 && r.exitCode !== null
 						? `⚠️ FAILED (exit code ${r.exitCode})${r.error ? `: ${r.error}` : ""}`
-						: !hasOutput
-							? "⚠️ EMPTY OUTPUT"
+						: r.error
+							? `⚠️ WARNING: ${r.error}`
+							: !hasOutput && r.outputTargetPath && r.outputTargetExists === false
+								? `⚠️ EMPTY OUTPUT (expected output file missing: ${r.outputTargetPath})`
+								: !hasOutput && !r.outputTargetPath
+									? "⚠️ EMPTY OUTPUT (no textual response returned)"
 							: "";
 			const body = status ? (hasOutput ? `${status}\n${r.output}` : status) : r.output;
 			return `${header}\n${body}`;

@@ -3,9 +3,6 @@
  */
 
 import { spawn } from "node:child_process";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentConfig } from "./agents.js";
 import {
@@ -24,7 +21,6 @@ import {
 	getSubagentDepthEnv,
 } from "./types.js";
 import {
-	writePrompt,
 	getFinalOutput,
 	findLatestSessionFile,
 	detectSubagentError,
@@ -34,15 +30,7 @@ import {
 import { buildSkillInjection, resolveSkills } from "./skills.js";
 import { getPiSpawnCommand } from "./pi-spawn.js";
 import { createJsonlWriter } from "./jsonl-writer.js";
-
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
-
-export function applyThinkingSuffix(model: string | undefined, thinking: string | undefined): string | undefined {
-	if (!model || !thinking || thinking === "off") return model;
-	const colonIdx = model.lastIndexOf(":");
-	if (colonIdx !== -1 && THINKING_LEVELS.includes(model.substring(colonIdx + 1))) return model;
-	return `${model}:${thinking}`;
-}
+import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "./pi-args.js";
 
 /**
  * Run a subagent synchronously (blocking until complete)
@@ -67,58 +55,13 @@ export async function runSync(
 		};
 	}
 
-	const args = ["--mode", "json", "-p"];
 	const shareEnabled = options.share === true;
 	const sessionEnabled = Boolean(options.sessionDir) || shareEnabled;
-	if (!sessionEnabled) {
-		args.push("--no-session");
-	}
-	if (options.sessionDir) {
-		try {
-			fs.mkdirSync(options.sessionDir, { recursive: true });
-		} catch {}
-		args.push("--session-dir", options.sessionDir);
-	}
 	const effectiveModel = modelOverride ?? agent.model;
 	const modelArg = applyThinkingSuffix(effectiveModel, agent.thinking);
-	// Use --models (not --model) because pi CLI silently ignores --model
-	// without a companion --provider flag. --models resolves the provider
-	// automatically via resolveModelScope. See: #8
-	if (modelArg) args.push("--models", modelArg);
-	const toolExtensionPaths: string[] = [];
-	if (agent.tools?.length) {
-		const builtinTools: string[] = [];
-		for (const tool of agent.tools) {
-			if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-				toolExtensionPaths.push(tool);
-			} else {
-				builtinTools.push(tool);
-			}
-		}
-		if (builtinTools.length > 0) {
-			args.push("--tools", builtinTools.join(","));
-		}
-	}
-	if (agent.extensions !== undefined) {
-		args.push("--no-extensions");
-		for (const extPath of agent.extensions) {
-			args.push("--extension", extPath);
-		}
-	} else {
-		for (const extPath of toolExtensionPaths) {
-			args.push("--extension", extPath);
-		}
-	}
 
 	const skillNames = options.skills ?? agent.skills ?? [];
 	const { resolved: resolvedSkills, missing: missingSkills } = resolveSkills(skillNames, runtimeCwd);
-
-	// When explicit skills are specified (via options or agent config), disable
-	// pi's own skill discovery so the spawned process doesn't inject the full
-	// <available_skills> catalog.  This mirrors how extensions are scoped above.
-	if (skillNames.length > 0) {
-		args.push("--no-skills");
-	}
 
 	let systemPrompt = agent.systemPrompt?.trim() || "";
 	if (resolvedSkills.length > 0) {
@@ -126,26 +69,20 @@ export async function runSync(
 		systemPrompt = systemPrompt ? `${systemPrompt}\n\n${skillInjection}` : skillInjection;
 	}
 
-	let tmpDir: string | null = null;
-	if (systemPrompt) {
-		const tmp = writePrompt(agent.name, systemPrompt);
-		tmpDir = tmp.dir;
-		args.push("--append-system-prompt", tmp.path);
-	}
-
-	// When the task is too long for a CLI argument (Windows ENAMETOOLONG),
-	// write it to a temp file and use pi's @file syntax instead.
-	const TASK_ARG_LIMIT = 8000;
-	if (task.length > TASK_ARG_LIMIT) {
-		if (!tmpDir) {
-			tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
-		}
-		const taskFilePath = path.join(tmpDir, "task.md");
-		fs.writeFileSync(taskFilePath, `Task: ${task}`, { mode: 0o600 });
-		args.push(`@${taskFilePath}`);
-	} else {
-		args.push(`Task: ${task}`);
-	}
+	const { args, env: sharedEnv, tempDir } = buildPiArgs({
+		baseArgs: ["--mode", "json", "-p"],
+		task,
+		sessionEnabled,
+		sessionDir: options.sessionDir,
+		model: effectiveModel,
+		thinking: agent.thinking,
+		tools: agent.tools,
+		extensions: agent.extensions,
+		skills: skillNames,
+		systemPrompt,
+		mcpDirectTools: agent.mcpDirectTools,
+		promptFileStem: agent.name,
+	});
 
 	const result: SingleResult = {
 		agent: agentName,
@@ -187,13 +124,7 @@ export async function runSync(
 		}
 	}
 
-	const spawnEnv = { ...process.env, ...getSubagentDepthEnv() };
-	const mcpDirect = agent.mcpDirectTools;
-	if (mcpDirect?.length) {
-		spawnEnv.MCP_DIRECT_TOOLS = mcpDirect.join(",");
-	} else {
-		spawnEnv.MCP_DIRECT_TOOLS = "__none__";
-	}
+	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv() };
 
 	let closeJsonlWriter: (() => Promise<void>) | undefined;
 	const exitCode = await new Promise<number>((resolve) => {
@@ -379,7 +310,7 @@ export async function runSync(
 		} catch {}
 	}
 
-	if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+	cleanupTempDir(tempDir);
 	result.exitCode = exitCode;
 
 	if (exitCode === 0 && !result.error) {

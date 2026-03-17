@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { AgentConfig } from "./agents.js";
-import { applyThinkingSuffix } from "./execution.js";
+import { applyThinkingSuffix } from "./pi-args.js";
 import { injectSingleOutputInstruction, resolveSingleOutputPath } from "./single-output.js";
 import { isParallelStep, resolveStepBehavior, type ChainStep, type ParallelStep, type SequentialStep, type StepOverrides } from "./settings.js";
 import type { RunnerStep } from "./parallel-utils.js";

@@ -1,7 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
-import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { appendJsonl, getArtifactPaths } from "./artifacts.js";
@@ -24,6 +23,7 @@ import {
 	aggregateParallelOutputs,
 	MAX_PARALLEL_CONCURRENCY,
 } from "./parallel-utils.js";
+import { buildPiArgs, cleanupTempDir } from "./pi-args.js";
 
 interface SubagentRunConfig {
 	id: string;
@@ -275,59 +275,21 @@ async function runSingleStep(
 	step: SubagentStep,
 	ctx: SingleStepContext,
 ): Promise<{ agent: string; output: string; exitCode: number | null; artifactPaths?: ArtifactPaths }> {
-	const args = ["-p"];
-	if (!ctx.sessionEnabled) {
-		args.push("--no-session");
-	}
-	if (ctx.sessionDir) {
-		try { fs.mkdirSync(ctx.sessionDir, { recursive: true }); } catch {}
-		args.push("--session-dir", ctx.sessionDir);
-	}
-	if (step.model) args.push("--models", step.model);
-
-	const toolExtensionPaths: string[] = [];
-	if (step.tools?.length) {
-		const builtinTools: string[] = [];
-		for (const tool of step.tools) {
-			if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
-				toolExtensionPaths.push(tool);
-			} else {
-				builtinTools.push(tool);
-			}
-		}
-		if (builtinTools.length > 0) args.push("--tools", builtinTools.join(","));
-	}
-	if (step.extensions !== undefined) {
-		args.push("--no-extensions");
-		for (const extPath of step.extensions) args.push("--extension", extPath);
-	} else {
-		for (const extPath of toolExtensionPaths) args.push("--extension", extPath);
-	}
-
-	if (step.skills?.length) {
-		args.push("--no-skills");
-	}
-
-	let tmpDir: string | null = null;
-	if (step.systemPrompt) {
-		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
-		const promptPath = path.join(tmpDir, "prompt.md");
-		fs.writeFileSync(promptPath, step.systemPrompt);
-		args.push("--append-system-prompt", promptPath);
-	}
-
 	const placeholderRegex = new RegExp(ctx.placeholder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
 	const task = step.task.replace(placeholderRegex, () => ctx.previousOutput);
-
-	const TASK_ARG_LIMIT = 8000;
-	if (task.length > TASK_ARG_LIMIT) {
-		if (!tmpDir) tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
-		const taskFilePath = path.join(tmpDir, "task.md");
-		fs.writeFileSync(taskFilePath, `Task: ${task}`, { mode: 0o600 });
-		args.push(`@${taskFilePath}`);
-	} else {
-		args.push(`Task: ${task}`);
-	}
+	const { args, env, tempDir } = buildPiArgs({
+		baseArgs: ["-p"],
+		task,
+		sessionEnabled: ctx.sessionEnabled,
+		sessionDir: ctx.sessionDir,
+		model: step.model,
+		tools: step.tools,
+		extensions: step.extensions,
+		skills: step.skills,
+		systemPrompt: step.systemPrompt,
+		mcpDirectTools: step.mcpDirectTools,
+		promptFileStem: step.agent,
+	});
 
 	let artifactPaths: ArtifactPaths | undefined;
 	if (ctx.artifactsDir && ctx.artifactConfig?.enabled !== false) {
@@ -339,18 +301,8 @@ async function runSingleStep(
 		}
 	}
 
-	const mcpEnv: Record<string, string | undefined> = {};
-	if (step.mcpDirectTools?.length) {
-		mcpEnv.MCP_DIRECT_TOOLS = step.mcpDirectTools.join(",");
-	} else {
-		mcpEnv.MCP_DIRECT_TOOLS = "__none__";
-	}
-
-	const result = await runPiStreaming(args, step.cwd ?? ctx.cwd, ctx.outputFile, mcpEnv, ctx.piPackageRoot);
-
-	if (tmpDir) {
-		try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
-	}
+	const result = await runPiStreaming(args, step.cwd ?? ctx.cwd, ctx.outputFile, env, ctx.piPackageRoot);
+	cleanupTempDir(tempDir);
 
 	const output = (result.stdout || "").trim();
 	let outputForSummary = output;

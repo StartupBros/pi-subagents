@@ -5,6 +5,8 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
+import type { FSWatcher } from "node:fs";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 // ============================================================================
 // Basic Types
@@ -173,6 +175,22 @@ export interface AsyncJobState {
 	outputFile?: string;
 	totalTokens?: TokenUsage;
 	sessionFile?: string;
+}
+
+export interface SubagentState {
+	baseCwd: string;
+	currentSessionId: string | null;
+	asyncJobs: Map<string, AsyncJobState>;
+	cleanupTimers: Map<string, ReturnType<typeof setTimeout>>;
+	lastUiContext: ExtensionContext | null;
+	poller: NodeJS.Timeout | null;
+	completionSeen: Map<string, number>;
+	watcher: FSWatcher | null;
+	watcherRestartTimer: ReturnType<typeof setTimeout> | null;
+	resultFileCoalescer: {
+		schedule(file: string, delayMs?: number): boolean;
+		clear(): void;
+	};
 }
 
 // ============================================================================

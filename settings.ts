@@ -352,41 +352,5 @@ export function createParallelDirs(
 	}
 }
 
-/** Result from a parallel task (simplified for aggregation) */
-export interface ParallelTaskResult {
-	agent: string;
-	taskIndex: number;
-	output: string;
-	exitCode: number;
-	error?: string;
-	outputTargetPath?: string;
-	outputTargetExists?: boolean;
-}
-
-/**
- * Aggregate outputs from parallel tasks into a single string for {previous}.
- * Uses clear separators so the next agent can parse all outputs.
- */
-export function aggregateParallelOutputs(results: ParallelTaskResult[]): string {
-	return results
-		.map((r, i) => {
-			const header = `=== Parallel Task ${i + 1} (${r.agent}) ===`;
-			const hasTextOutput = Boolean(r.output?.trim());
-			const status = r.exitCode === -1
-				? "⏭️ SKIPPED"
-				: r.exitCode !== 0
-					? `⚠️ FAILED (exit code ${r.exitCode})${r.error ? `: ${r.error}` : ""}`
-					: r.error
-						? `⚠️ WARNING: ${r.error}`
-						: !hasTextOutput && r.outputTargetPath && r.outputTargetExists === false
-							? `⚠️ EMPTY OUTPUT (expected output file missing: ${r.outputTargetPath})`
-							: !hasTextOutput && !r.outputTargetPath
-								? "⚠️ EMPTY OUTPUT (no textual response returned)"
-								: "";
-			const body = status
-				? (hasTextOutput ? `${status}\n${r.output}` : status)
-				: r.output;
-			return `${header}\n${body}`;
-		})
-		.join("\n\n");
-}
+export type { ParallelTaskResult } from "./parallel-utils.js";
+export { aggregateParallelOutputs } from "./parallel-utils.js";
