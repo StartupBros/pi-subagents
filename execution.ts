@@ -7,13 +7,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
-import type { AgentConfig } from "./agents.js";
+import type { AgentConfig } from "./agents.ts";
 import {
 	ensureArtifactsDir,
 	getArtifactPaths,
 	writeArtifact,
 	writeMetadata,
-} from "./artifacts.js";
+} from "./artifacts.ts";
 import {
 	type AgentProgress,
 	type ArtifactPaths,
@@ -22,7 +22,7 @@ import {
 	DEFAULT_MAX_OUTPUT,
 	truncateOutput,
 	getSubagentDepthEnv,
-} from "./types.js";
+} from "./types.ts";
 import {
 	writePrompt,
 	getFinalOutput,
@@ -30,10 +30,10 @@ import {
 	detectSubagentError,
 	extractToolArgsPreview,
 	extractTextFromContent,
-} from "./utils.js";
-import { buildSkillInjection, resolveSkills } from "./skills.js";
-import { getPiSpawnCommand } from "./pi-spawn.js";
-import { createJsonlWriter } from "./jsonl-writer.js";
+} from "./utils.ts";
+import { buildSkillInjection, resolveSkills } from "./skills.ts";
+import { getPiSpawnCommand } from "./pi-spawn.ts";
+import { createJsonlWriter } from "./jsonl-writer.ts";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 

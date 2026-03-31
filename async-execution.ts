@@ -9,20 +9,20 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { AgentConfig } from "./agents.js";
-import { applyThinkingSuffix } from "./execution.js";
-import { injectSingleOutputInstruction, resolveSingleOutputPath } from "./single-output.js";
-import { isParallelStep, resolveStepBehavior, type ChainStep, type ParallelStep, type SequentialStep, type StepOverrides } from "./settings.js";
-import type { RunnerStep } from "./parallel-utils.js";
-import { resolvePiPackageRoot } from "./pi-spawn.js";
-import { buildSkillInjection, normalizeSkillInput, resolveSkills } from "./skills.js";
+import type { AgentConfig } from "./agents.ts";
+import { applyThinkingSuffix } from "./execution.ts";
+import { injectSingleOutputInstruction, resolveSingleOutputPath } from "./single-output.ts";
+import { isParallelStep, resolveStepBehavior, type ChainStep, type ParallelStep, type SequentialStep, type StepOverrides } from "./settings.ts";
+import type { RunnerStep } from "./parallel-utils.ts";
+import { resolvePiPackageRoot } from "./pi-spawn.ts";
+import { buildSkillInjection, normalizeSkillInput, resolveSkills } from "./skills.ts";
 import {
 	type ArtifactConfig,
 	type Details,
 	type MaxOutputConfig,
 	ASYNC_DIR,
 	RESULTS_DIR,
-} from "./types.js";
+} from "./types.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
