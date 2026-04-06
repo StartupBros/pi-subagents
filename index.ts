@@ -9,7 +9,7 @@
  * Toggle: async parameter (default: false, configurable via config.json)
  *
  * Config file: ~/.pi/agent/extensions/subagent/config.json
- *   { "asyncByDefault": true, "maxSubagentDepth": 1, "worktreeSetupHook": "./scripts/setup-worktree.mjs" }
+ *   { "asyncByDefault": true, "managerCommand": "subagents", "maxSubagentDepth": 1, "worktreeSetupHook": "./scripts/setup-worktree.mjs" }
  */
 
 import * as fs from "node:fs";
@@ -73,6 +73,15 @@ function loadConfig(): ExtensionConfig {
 
 function expandTilde(p: string): string {
 	return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+}
+
+function getManagerCommand(config: ExtensionConfig): string | undefined {
+	if (config.managerCommand === false) return undefined;
+	if (typeof config.managerCommand === "string") {
+		const normalized = config.managerCommand.trim().replace(/^\/+/, "");
+		return normalized || undefined;
+	}
+	return "agents";
 }
 
 /**
@@ -146,6 +155,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	const config = loadConfig();
 	const asyncByDefault = config.asyncByDefault === true;
+	const managerCommand = getManagerCommand(config);
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
 
@@ -432,7 +442,7 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 
 	pi.registerTool(tool);
 	pi.registerTool(statusTool);
-	registerSlashCommands(pi, state);
+	registerSlashCommands(pi, state, managerCommand);
 
 	pi.events.on("subagent:started", handleStarted);
 	pi.events.on("subagent:complete", handleComplete);

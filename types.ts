@@ -244,6 +244,7 @@ export interface RunSyncOptions {
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
 	defaultSessionDir?: string;
+	managerCommand?: string | false;
 	maxSubagentDepth?: number;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;

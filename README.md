@@ -133,7 +133,7 @@ Subagents only get direct MCP tools when `mcp:` items are explicitly listed. Eve
 | `/chain agent1 "task1" -> agent2 "task2"` | Run agents in sequence with per-step tasks |
 | `/parallel agent1 "task1" -> agent2 "task2"` | Run agents in parallel with per-step tasks |
 | `/subagents-status` | Open the async status overlay for active and recent runs |
-| `/agents` | Open the Agents Manager overlay |
+| `/agents` | Open the Agents Manager overlay (default; configurable via `managerCommand`) |
 
 All commands validate agent names locally and tab-complete them, then route through the tool framework for full live progress rendering. Results are sent to the conversation for the LLM to discuss.
 
@@ -214,6 +214,8 @@ You can combine `--fork` and `--bg` in any order:
 ## Agents Manager
 
 Press **Ctrl+Shift+A** or type `/agents` to open the Agents Manager overlay — a TUI for browsing, viewing, editing, creating, and launching agents and chains.
+
+`/agents` is the default manager command. You can rename or disable it with `managerCommand` in config if another extension already owns `/agents`.
 
 **Screens:**
 
@@ -750,6 +752,20 @@ Session root resolution follows this precedence:
 1. `params.sessionDir` from the `subagent` tool call
 2. `config.defaultSessionDir`
 3. Derived from parent session (stored alongside parent session file)
+
+### `managerCommand`
+
+`managerCommand` controls which slash command opens the Agents Manager overlay. Default: `"agents"`.
+
+```json
+{
+  "managerCommand": "subagents"
+}
+```
+
+Notes:
+- leading slashes are normalized, so `"/subagents"` works too
+- set `false` to disable the manager command entirely while keeping `Ctrl+Shift+A`
 
 Sessions are always enabled — every subagent run gets a session directory for tracking.
 
