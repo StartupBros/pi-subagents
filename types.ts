@@ -82,6 +82,42 @@ export interface ProgressSummary {
 // Results
 // ============================================================================
 
+export type ModelCandidateSource = "override" | "agent" | "session" | "fallback";
+
+export interface RuntimeModelFallbackConfig {
+	preferCurrentSessionModel?: boolean;
+	fallbackModels?: string[];
+	cooldownMinutes?: number;
+}
+
+export interface AvailableModelInfo {
+	provider: string;
+	id: string;
+	fullId: string;
+}
+
+export interface RuntimeModelExecutionContext {
+	availableModels?: AvailableModelInfo[];
+	currentSessionModel?: string;
+	config?: RuntimeModelFallbackConfig;
+	cooldownPath?: string;
+}
+
+export interface ModelCandidate {
+	model: string;
+	source: ModelCandidateSource;
+	normalizedModel?: string;
+}
+
+export interface ModelAttempt {
+	model: string;
+	source: ModelCandidateSource;
+	outcome: "success" | "failed" | "skipped";
+	classification?: "retryable-runtime" | "deterministic" | "cooldown" | "unknown";
+	reason?: string;
+	cooldownScope?: "model" | "provider";
+}
+
 export interface SingleResult {
 	agent: string;
 	task: string;
@@ -89,6 +125,10 @@ export interface SingleResult {
 	messages: Message[];
 	usage: Usage;
 	model?: string;
+	requestedModel?: string;
+	finalModel?: string;
+	modelAttempts?: ModelAttempt[];
+	fallbackSummary?: string;
 	error?: string;
 	sessionFile?: string;
 	skills?: string[];
@@ -150,6 +190,18 @@ export interface ArtifactConfig {
 // Async Execution
 // ============================================================================
 
+export interface AsyncStepStatus {
+	agent: string;
+	status: string;
+	durationMs?: number;
+	tokens?: TokenUsage;
+	skills?: string[];
+	requestedModel?: string;
+	finalModel?: string;
+	modelAttempts?: ModelAttempt[];
+	lastFallbackReason?: string;
+}
+
 export interface AsyncStatus {
 	runId: string;
 	mode: "single" | "chain";
@@ -159,7 +211,7 @@ export interface AsyncStatus {
 	lastUpdate?: number;
 	cwd?: string;
 	currentStep?: number;
-	steps?: Array<{ agent: string; status: string; durationMs?: number; tokens?: TokenUsage; skills?: string[] }>;
+	steps?: AsyncStepStatus[];
 	sessionDir?: string;
 	outputFile?: string;
 	totalTokens?: TokenUsage;
@@ -237,11 +289,13 @@ export interface RunSyncOptions {
 	maxSubagentDepth?: number;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;
+	/** Shared runtime fallback policy context */
+	runtimeModelContext?: RuntimeModelExecutionContext;
 	/** Skills to inject (overrides agent default if provided) */
 	skills?: string[];
 }
 
-export interface ExtensionConfig {
+export interface ExtensionConfig extends RuntimeModelFallbackConfig {
 	asyncByDefault?: boolean;
 	defaultSessionDir?: string;
 	managerCommand?: string | false;

@@ -105,7 +105,11 @@ export function makeAgent(name: string, overrides: Partial<AgentConfig> = {}): A
  * Create a minimal ExtensionContext mock for chain execution.
  * Only provides what executeChain needs when clarify=false.
  */
-export function makeMinimalCtx(cwd: string): any {
+export function makeMinimalCtx(
+	cwd: string,
+	availableModels: string[] = [],
+	currentModel?: { provider?: string; id?: string; fullId?: string },
+): any {
 	return {
 		cwd,
 		hasUI: false,
@@ -114,8 +118,12 @@ export function makeMinimalCtx(cwd: string): any {
 			getSessionFile: () => null,
 		},
 		modelRegistry: {
-			getAvailable: () => [],
+			getAvailable: () => availableModels.map((fullId) => {
+				const [provider, ...idParts] = fullId.split("/");
+				return { provider, id: idParts.join("/") };
+			}),
 		},
+		...(currentModel ? { model: currentModel } : {}),
 	};
 }
 

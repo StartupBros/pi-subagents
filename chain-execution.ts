@@ -44,6 +44,7 @@ import {
 	type ArtifactConfig,
 	type ArtifactPaths,
 	type Details,
+	type RuntimeModelExecutionContext,
 	type SingleResult,
 	MAX_CONCURRENCY,
 	resolveChildMaxSubagentDepth,
@@ -104,6 +105,7 @@ interface ParallelChainRunInput {
 	totalSteps: number;
 	worktreeSetup?: WorktreeSetup;
 	maxSubagentDepth: number;
+	runtimeModelContext?: RuntimeModelExecutionContext;
 }
 
 function buildChainExecutionDetails(input: ChainExecutionDetailsInput): Details {
@@ -216,6 +218,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				outputPath,
 				maxSubagentDepth,
 				modelOverride: effectiveModel,
+				runtimeModelContext: input.runtimeModelContext,
 				skills: behavior.skills === false ? [] : behavior.skills,
 				onUpdate: input.onUpdate
 					? (progressUpdate) => {
@@ -266,6 +269,7 @@ export interface ChainExecutionParams {
 	chainSkills?: string[];
 	chainDir?: string;
 	maxSubagentDepth: number;
+	runtimeModelContext?: RuntimeModelExecutionContext;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
 }
@@ -524,6 +528,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					totalSteps,
 					worktreeSetup,
 					maxSubagentDepth: params.maxSubagentDepth,
+					runtimeModelContext: params.runtimeModelContext,
 				});
 				globalTaskIndex += step.parallel.length;
 
@@ -665,6 +670,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				outputPath,
 				maxSubagentDepth,
 				modelOverride: effectiveModel,
+				runtimeModelContext: params.runtimeModelContext,
 				skills: behavior.skills === false ? [] : behavior.skills,
 				onUpdate: onUpdate
 					? (p) => {

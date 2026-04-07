@@ -10,7 +10,6 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
-import { applyThinkingSuffix } from "./pi-args.ts";
 import { injectSingleOutputInstruction, resolveSingleOutputPath } from "./single-output.ts";
 import { isParallelStep, resolveStepBehavior, type ChainStep, type SequentialStep, type StepOverrides } from "./settings.ts";
 import type { RunnerStep } from "./parallel-utils.ts";
@@ -20,6 +19,7 @@ import {
 	type ArtifactConfig,
 	type Details,
 	type MaxOutputConfig,
+	type RuntimeModelExecutionContext,
 	ASYNC_DIR,
 	RESULTS_DIR,
 	resolveChildMaxSubagentDepth,
@@ -67,6 +67,7 @@ export interface AsyncChainParams {
 	chainSkills?: string[];
 	sessionFilesByFlatIndex?: (string | undefined)[];
 	maxSubagentDepth: number;
+	runtimeModelContext?: RuntimeModelExecutionContext;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
 }
@@ -85,7 +86,9 @@ export interface AsyncSingleParams {
 	sessionFile?: string;
 	skills?: string[];
 	output?: string | false;
+	modelOverride?: string;
 	maxSubagentDepth: number;
+	runtimeModelContext?: RuntimeModelExecutionContext;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
 }
@@ -199,7 +202,10 @@ export function executeAsyncChain(
 			agent: s.agent,
 			task,
 			cwd: s.cwd,
-			model: applyThinkingSuffix(s.model ?? a.model, a.thinking),
+			modelOverride: s.model,
+			agentModel: a.model,
+			thinking: a.thinking,
+			runtimeModelContext: params.runtimeModelContext,
 			tools: a.tools,
 			extensions: a.extensions,
 			mcpDirectTools: a.mcpDirectTools,
@@ -349,7 +355,10 @@ export function executeAsyncSingle(
 					agent,
 					task: taskWithOutputInstruction,
 					cwd,
-					model: applyThinkingSuffix(agentConfig.model, agentConfig.thinking),
+					modelOverride: params.modelOverride,
+					agentModel: agentConfig.model,
+					thinking: agentConfig.thinking,
+					runtimeModelContext: params.runtimeModelContext,
 					tools: agentConfig.tools,
 					extensions: agentConfig.extensions,
 					mcpDirectTools: agentConfig.mcpDirectTools,

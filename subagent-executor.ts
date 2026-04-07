@@ -21,6 +21,7 @@ import {
 } from "./settings.js";
 import { discoverAvailableSkills, normalizeSkillInput } from "./skills.js";
 import { executeAsyncChain, executeAsyncSingle, isAsyncAvailable } from "./async-execution.js";
+import { buildRuntimeModelContext } from "./runtime-model-context.js";
 import { createForkContextResolver } from "./fork-context.js";
 import { finalizeSingleOutput, injectSingleOutputInstruction, resolveSingleOutputPath } from "./single-output.js";
 import { getSingleResultOutput, mapConcurrent } from "./utils.js";
@@ -440,6 +441,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		onUpdate,
 		sessionRoot,
 	} = data;
+	const runtimeModelContext = buildRuntimeModelContext(ctx, deps.config, sessionRoot);
 	const normalized = normalizeSkillInput(params.skill);
 	const chainSkills = normalized === false ? [] : (normalized ?? []);
 	const chain = wrapChainTasksForFork(params.chain as ChainStep[], params.context);
@@ -463,6 +465,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		chainSkills,
 		chainDir: params.chainDir,
 		maxSubagentDepth: currentMaxSubagentDepth,
+		runtimeModelContext,
 		worktreeSetupHook: deps.config.worktreeSetupHook,
 		worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
 	});
@@ -491,6 +494,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			chainSkills: chainResult.requestedAsync.chainSkills,
 			sessionFilesByFlatIndex: collectChainSessionFiles(asyncChain, sessionFileForIndex),
 			maxSubagentDepth: currentMaxSubagentDepth,
+			runtimeModelContext,
 			worktreeSetupHook: deps.config.worktreeSetupHook,
 			worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
 		});
@@ -519,6 +523,7 @@ interface ForegroundParallelRunInput {
 	behaviors: Array<ReturnType<typeof resolveStepBehavior>>;
 	liveResults: (SingleResult | undefined)[];
 	liveProgress: (AgentProgress | undefined)[];
+	runtimeModelContext: ReturnType<typeof buildRuntimeModelContext>;
 	onUpdate?: (r: AgentToolResult<Details>) => void;
 	worktreeSetup?: WorktreeSetup;
 }
@@ -616,6 +621,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			maxOutput: input.maxOutput,
 			maxSubagentDepth: input.maxSubagentDepths[index],
 			modelOverride: input.modelOverrides[index],
+			runtimeModelContext: input.runtimeModelContext,
 			skills: effectiveSkills === false ? [] : effectiveSkills,
 			onUpdate: input.onUpdate
 				? (progressUpdate) => {
@@ -659,6 +665,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 	const allProgress: AgentProgress[] = [];
 	const allArtifactPaths: ArtifactPaths[] = [];
 	const tasks = params.tasks!;
+	const runtimeModelContext = buildRuntimeModelContext(ctx, deps.config, sessionRoot);
 
 	if (tasks.length > MAX_PARALLEL)
 		return {
@@ -767,6 +774,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				chainSkills: [],
 				sessionFilesByFlatIndex: tasks.map((_, index) => sessionFileForIndex(index)),
 				maxSubagentDepth: currentMaxSubagentDepth,
+				runtimeModelContext,
 				worktreeSetupHook: deps.config.worktreeSetupHook,
 				worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
 			});
@@ -811,6 +819,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			skillOverrides,
 			behaviors,
 			maxSubagentDepths,
+			runtimeModelContext,
 			liveResults,
 			liveProgress,
 			onUpdate,
@@ -875,6 +884,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	} = data;
 	const allProgress: AgentProgress[] = [];
 	const allArtifactPaths: ArtifactPaths[] = [];
+	const runtimeModelContext = buildRuntimeModelContext(ctx, deps.config, sessionRoot);
 	const agentConfig = agents.find((a) => a.name === params.agent);
 	if (!agentConfig) {
 		return {
@@ -953,7 +963,9 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				sessionFile: sessionFileForIndex(0),
 				skills: skillOverride === false ? [] : skillOverride,
 				output: effectiveOutput,
+				modelOverride,
 				maxSubagentDepth,
+				runtimeModelContext,
 				worktreeSetupHook: deps.config.worktreeSetupHook,
 				worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
 			});
@@ -988,6 +1000,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		maxSubagentDepth,
 		onUpdate,
 		modelOverride,
+		runtimeModelContext,
 		skills: effectiveSkills,
 	});
 	recordRun(params.agent!, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0);

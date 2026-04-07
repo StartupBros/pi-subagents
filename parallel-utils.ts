@@ -4,12 +4,18 @@
  * without pulling in the full extension dependency tree.
  */
 
+import type { RuntimeModelExecutionContext } from "./types.ts";
+
 /** A single agent step in the runner config */
 export interface RunnerSubagentStep {
 	agent: string;
 	task: string;
 	cwd?: string;
 	model?: string;
+	modelOverride?: string;
+	agentModel?: string;
+	thinking?: string;
+	runtimeModelContext?: RuntimeModelExecutionContext;
 	tools?: string[];
 	extensions?: string[];
 	mcpDirectTools?: string[];

@@ -9,6 +9,8 @@ import { captureSingleOutputSnapshot, resolveSingleOutput } from "./single-outpu
 import {
 	type ArtifactConfig,
 	type ArtifactPaths,
+	type AsyncStepStatus,
+	type ModelAttempt,
 	DEFAULT_MAX_OUTPUT,
 	type MaxOutputConfig,
 	truncateOutput,
@@ -24,6 +26,7 @@ import {
 	MAX_PARALLEL_CONCURRENCY,
 } from "./parallel-utils.ts";
 import { buildPiArgs, cleanupTempDir } from "./pi-args.ts";
+import { executeWithRuntimeModelFallback, type ModelAttemptExecutionResult } from "./runtime-model-fallback.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
@@ -58,7 +61,13 @@ interface StepResult {
 	agent: string;
 	output: string;
 	success: boolean;
+	exitCode?: number | null;
+	error?: string;
 	skipped?: boolean;
+	requestedModel?: string;
+	finalModel?: string;
+	modelAttempts?: ModelAttempt[];
+	fallbackSummary?: string;
 	artifactPaths?: ArtifactPaths;
 	truncated?: boolean;
 }
@@ -119,13 +128,14 @@ function runPiStreaming(
 	env?: Record<string, string | undefined>,
 	piPackageRoot?: string,
 	maxSubagentDepth?: number,
-): Promise<{ stdout: string; exitCode: number | null }> {
+): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
 	return new Promise((resolve) => {
 		const outputStream = fs.createWriteStream(outputFile, { flags: "w" });
 		const spawnEnv = { ...process.env, ...(env ?? {}), ...getSubagentDepthEnv(maxSubagentDepth) };
 		const spawnSpec = getPiSpawnCommand(args, piPackageRoot ? { piPackageRoot } : undefined);
 		const child = spawn(spawnSpec.command, spawnSpec.args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: spawnEnv });
 		let stdout = "";
+		let stderr = "";
 
 		child.stdout.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
@@ -134,17 +144,19 @@ function runPiStreaming(
 		});
 
 		child.stderr.on("data", (chunk: Buffer) => {
-			outputStream.write(chunk.toString());
+			const text = chunk.toString();
+			stderr += text;
+			outputStream.write(text);
 		});
 
 		child.on("close", (exitCode) => {
 			outputStream.end();
-			resolve({ stdout, exitCode });
+			resolve({ stdout, stderr, exitCode });
 		});
 
 		child.on("error", () => {
 			outputStream.end();
-			resolve({ stdout, exitCode: 1 });
+			resolve({ stdout, stderr, exitCode: 1 });
 		});
 	});
 }
@@ -301,11 +313,21 @@ interface SingleStepContext {
 	piPackageRoot?: string;
 }
 
-/** Run a single pi agent step, returning output and metadata */
-async function runSingleStep(
+function buildFailedStepResult(step: SubagentStep, task: string, error: string): StepResult {
+	return {
+		agent: step.agent,
+		output: error,
+		success: false,
+		exitCode: 1,
+		error,
+	};
+}
+
+async function runSingleStepAttempt(
 	step: SubagentStep,
 	ctx: SingleStepContext,
-): Promise<{ agent: string; output: string; exitCode: number | null; artifactPaths?: ArtifactPaths }> {
+	attemptModel?: string,
+): Promise<ModelAttemptExecutionResult<StepResult>> {
 	const placeholderRegex = new RegExp(ctx.placeholder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
 	const task = step.task.replace(placeholderRegex, () => ctx.previousOutput);
 	const sessionEnabled = Boolean(step.sessionFile) || ctx.sessionEnabled;
@@ -317,7 +339,8 @@ async function runSingleStep(
 		sessionEnabled,
 		sessionDir,
 		sessionFile: step.sessionFile,
-		model: step.model,
+		model: attemptModel ?? step.modelOverride ?? step.agentModel ?? step.model,
+		thinking: step.thinking,
 		tools: step.tools,
 		extensions: step.extensions,
 		skills: step.skills,
@@ -336,7 +359,14 @@ async function runSingleStep(
 		}
 	}
 
-	const result = await runPiStreaming(args, step.cwd ?? ctx.cwd, ctx.outputFile, env, ctx.piPackageRoot, step.maxSubagentDepth);
+	const result = await runPiStreaming(
+		args,
+		step.cwd ?? ctx.cwd,
+		ctx.outputFile,
+		env,
+		ctx.piPackageRoot,
+		step.maxSubagentDepth,
+	);
 	cleanupTempDir(tempDir);
 
 	const rawOutput = (result.stdout || "").trim();
@@ -367,6 +397,7 @@ async function runSingleStep(
 					agent: step.agent,
 					task,
 					exitCode: result.exitCode,
+					model: attemptModel,
 					skills: step.skills,
 					timestamp: Date.now(),
 				}, null, 2),
@@ -375,7 +406,46 @@ async function runSingleStep(
 		}
 	}
 
-	return { agent: step.agent, output: outputForSummary, exitCode: result.exitCode, artifactPaths };
+	const stepResult: StepResult = {
+		agent: step.agent,
+		output: outputForSummary,
+		success: result.exitCode === 0,
+		exitCode: result.exitCode,
+		error: result.exitCode === 0 ? undefined : (result.stderr || outputForSummary || "Step failed"),
+		artifactPaths,
+		finalModel: attemptModel,
+	};
+	return {
+		ok: result.exitCode === 0,
+		result: stepResult,
+		exitCode: result.exitCode,
+		error: stepResult.error,
+		stderr: result.stderr,
+		stdout: result.stdout,
+		output: outputForSummary,
+	};
+}
+
+/** Run a single pi agent step, returning output and metadata */
+async function runSingleStep(
+	step: SubagentStep,
+	ctx: SingleStepContext,
+): Promise<StepResult> {
+	const execution = await executeWithRuntimeModelFallback<StepResult>({
+		context: step.runtimeModelContext,
+		modelOverride: step.modelOverride ?? step.model,
+		agentModel: step.agentModel,
+		agentThinking: step.thinking,
+		makeFailureResult: (message) => buildFailedStepResult(step, step.task, message),
+		executeAttempt: async (candidate) => runSingleStepAttempt(step, ctx, candidate?.normalizedModel ?? candidate?.model),
+	});
+
+	const result = execution.result;
+	result.requestedModel = execution.requestedModel;
+	result.finalModel = result.finalModel ?? execution.finalModel;
+	result.modelAttempts = execution.modelAttempts;
+	result.fallbackSummary = execution.fallbackSummary;
+	return result;
 }
 
 type RunnerStatusPayload = {
@@ -388,15 +458,13 @@ type RunnerStatusPayload = {
 	pid: number;
 	cwd: string;
 	currentStep: number;
-	steps: Array<{
+	steps: Array<AsyncStepStatus & {
 		agent: string;
 		status: "pending" | "running" | "complete" | "failed";
 		startedAt?: number;
 		endedAt?: number;
 		durationMs?: number;
 		exitCode?: number | null;
-		tokens?: TokenUsage;
-		skills?: string[];
 	}>;
 	artifactsDir?: string;
 	sessionDir?: string;
@@ -630,7 +698,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					concurrency,
 					async (task, taskIdx) => {
 						if (aborted && failFast) {
-							return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
+							return { agent: task.agent, output: "(skipped — fail-fast)", success: false, exitCode: -1 as number | null, skipped: true };
 						}
 
 						const fi = groupStartFlatIndex + taskIdx;
@@ -664,6 +732,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].endedAt = taskEndTime;
 						statusPayload.steps[fi].durationMs = taskDuration;
 						statusPayload.steps[fi].exitCode = singleResult.exitCode;
+						statusPayload.steps[fi].requestedModel = singleResult.requestedModel;
+						statusPayload.steps[fi].finalModel = singleResult.finalModel;
+						statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
+						statusPayload.steps[fi].lastFallbackReason = singleResult.fallbackSummary ?? singleResult.modelAttempts?.at(-1)?.reason;
 						statusPayload.lastUpdate = taskEndTime;
 						writeJson(statusPath, statusPayload);
 
@@ -706,7 +778,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						agent: pr.agent,
 						output: pr.output,
 						success: pr.exitCode === 0,
+						exitCode: pr.exitCode,
+						error: pr.error,
 						skipped: pr.skipped,
+						requestedModel: pr.requestedModel,
+						finalModel: pr.finalModel,
+						modelAttempts: pr.modelAttempts,
+						fallbackSummary: pr.fallbackSummary,
 						artifactPaths: pr.artifactPaths,
 					});
 				}
@@ -768,6 +846,12 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				agent: singleResult.agent,
 				output: singleResult.output,
 				success: singleResult.exitCode === 0,
+				exitCode: singleResult.exitCode,
+				error: singleResult.error,
+				requestedModel: singleResult.requestedModel,
+				finalModel: singleResult.finalModel,
+				modelAttempts: singleResult.modelAttempts,
+				fallbackSummary: singleResult.fallbackSummary,
 				artifactPaths: singleResult.artifactPaths,
 			});
 
@@ -788,6 +872,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].endedAt = stepEndTime;
 			statusPayload.steps[flatIndex].durationMs = stepEndTime - stepStartTime;
 			statusPayload.steps[flatIndex].exitCode = singleResult.exitCode;
+			statusPayload.steps[flatIndex].requestedModel = singleResult.requestedModel;
+			statusPayload.steps[flatIndex].finalModel = singleResult.finalModel;
+			statusPayload.steps[flatIndex].modelAttempts = singleResult.modelAttempts;
+			statusPayload.steps[flatIndex].lastFallbackReason = singleResult.fallbackSummary ?? singleResult.modelAttempts?.at(-1)?.reason;
 			if (stepTokens) {
 				statusPayload.steps[flatIndex].tokens = stepTokens;
 				statusPayload.totalTokens = { ...previousCumulativeTokens };
@@ -915,6 +1003,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				output: r.output,
 				success: r.success,
 				skipped: r.skipped || undefined,
+				requestedModel: r.requestedModel,
+				finalModel: r.finalModel,
+				modelAttempts: r.modelAttempts,
+				fallbackSummary: r.fallbackSummary,
 				artifactPaths: r.artifactPaths,
 				truncated: r.truncated,
 			})),

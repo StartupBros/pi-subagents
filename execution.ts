@@ -16,6 +16,7 @@ import {
 	type ArtifactPaths,
 	type RunSyncOptions,
 	type SingleResult,
+	type Usage,
 	DEFAULT_MAX_OUTPUT,
 	truncateOutput,
 	getSubagentDepthEnv,
@@ -30,35 +31,69 @@ import {
 import { buildSkillInjection, resolveSkills } from "./skills.ts";
 import { getPiSpawnCommand } from "./pi-spawn.ts";
 import { createJsonlWriter } from "./jsonl-writer.ts";
+import {
+	executeWithRuntimeModelFallback,
+	type ModelAttemptExecutionResult,
+} from "./runtime-model-fallback.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "./pi-args.ts";
 import { captureSingleOutputSnapshot, resolveSingleOutput } from "./single-output.ts";
 
-/**
- * Run a subagent synchronously (blocking until complete)
- */
-export async function runSync(
+function emptyUsage(): Usage {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+}
+
+function mergeUsage(results: SingleResult[]): Usage {
+	return results.reduce<Usage>((totals, result) => ({
+		input: totals.input + result.usage.input,
+		output: totals.output + result.usage.output,
+		cacheRead: totals.cacheRead + result.usage.cacheRead,
+		cacheWrite: totals.cacheWrite + result.usage.cacheWrite,
+		cost: totals.cost + result.usage.cost,
+		turns: totals.turns + result.usage.turns,
+	}), emptyUsage());
+}
+
+function emitFallbackUpdate(
+	onUpdate: RunSyncOptions["onUpdate"],
+	result: SingleResult,
+	message: string,
+): void {
+	if (!onUpdate) return;
+	const progress = result.progress;
+	if (progress) {
+		progress.recentOutput.push(message);
+		if (progress.recentOutput.length > 50) {
+			progress.recentOutput.splice(0, progress.recentOutput.length - 50);
+		}
+	}
+	onUpdate({
+		content: [{ type: "text", text: message }],
+		details: { mode: "single", results: [result], progress: progress ? [progress] : undefined },
+	});
+}
+
+function buildFailureResult(agentName: string, task: string, error: string): SingleResult {
+	return {
+		agent: agentName,
+		task,
+		exitCode: 1,
+		messages: [],
+		usage: emptyUsage(),
+		error,
+	};
+}
+
+async function runSyncAttempt(
 	runtimeCwd: string,
-	agents: AgentConfig[],
-	agentName: string,
+	agent: AgentConfig,
 	task: string,
 	options: RunSyncOptions,
-): Promise<SingleResult> {
-	const { cwd, signal, onUpdate, maxOutput, artifactsDir, artifactConfig, runId, index, modelOverride } = options;
-	const agent = agents.find((a) => a.name === agentName);
-	if (!agent) {
-		return {
-			agent: agentName,
-			task,
-			exitCode: 1,
-			messages: [],
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
-			error: `Unknown agent: ${agentName}`,
-		};
-	}
-
+	attemptModel?: string,
+): Promise<ModelAttemptExecutionResult<SingleResult>> {
+	const { cwd, signal, onUpdate, maxOutput, artifactsDir, artifactConfig, runId, index } = options;
 	const shareEnabled = options.share === true;
 	const sessionEnabled = Boolean(options.sessionFile || options.sessionDir) || shareEnabled;
-	const effectiveModel = modelOverride ?? agent.model;
+	const effectiveModel = attemptModel ?? options.modelOverride ?? agent.model;
 	const modelArg = applyThinkingSuffix(effectiveModel, agent.thinking);
 	const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
 
@@ -88,11 +123,11 @@ export async function runSync(
 	});
 
 	const result: SingleResult = {
-		agent: agentName,
+		agent: agent.name,
 		task,
 		exitCode: 0,
 		messages: [],
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+		usage: emptyUsage(),
 		model: modelArg,
 		skills: resolvedSkills.length > 0 ? resolvedSkills.map((s) => s.name) : undefined,
 		skillsWarning: missingSkills.length > 0 ? `Skills not found: ${missingSkills.join(", ")}` : undefined,
@@ -100,7 +135,7 @@ export async function runSync(
 
 	const progress: AgentProgress = {
 		index: index ?? 0,
-		agent: agentName,
+		agent: agent.name,
 		status: "running",
 		task,
 		skills: resolvedSkills.length > 0 ? resolvedSkills.map((s) => s.name) : undefined,
@@ -117,10 +152,10 @@ export async function runSync(
 	let artifactPathsResult: ArtifactPaths | undefined;
 	let jsonlPath: string | undefined;
 	if (artifactsDir && artifactConfig?.enabled !== false) {
-		artifactPathsResult = getArtifactPaths(artifactsDir, runId, agentName, index);
+		artifactPathsResult = getArtifactPaths(artifactsDir, runId, agent.name, index);
 		ensureArtifactsDir(artifactsDir);
 		if (artifactConfig?.includeInput !== false) {
-			writeArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${task}`);
+			writeArtifact(artifactPathsResult.inputPath, `# Task for ${agent.name}\n\n${task}`);
 		}
 		if (artifactConfig?.includeJsonl !== false) {
 			jsonlPath = artifactPathsResult.jsonlPath;
@@ -130,6 +165,7 @@ export async function runSync(
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 
 	let closeJsonlWriter: (() => Promise<void>) | undefined;
+	let stderrBuf = "";
 	const exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(args);
 		const proc = spawn(spawnSpec.command, spawnSpec.args, {
@@ -140,7 +176,6 @@ export async function runSync(
 		const jsonlWriter = createJsonlWriter(jsonlPath, proc.stdout);
 		closeJsonlWriter = () => jsonlWriter.close();
 		let buf = "";
-
 		let processClosed = false;
 
 		const fireUpdate = () => {
@@ -198,11 +233,7 @@ export async function runSync(
 
 						const text = extractTextFromContent(evt.message.content);
 						if (text) {
-							const lines = text
-								.split("\n")
-								.filter((l) => l.trim())
-								.slice(-10);
-							// Append to existing recentOutput (keep last 50 total) - mutate in place for efficiency
+							const lines = text.split("\n").filter((l) => l.trim()).slice(-10);
 							progress.recentOutput.push(...lines);
 							if (progress.recentOutput.length > 50) {
 								progress.recentOutput.splice(0, progress.recentOutput.length - 50);
@@ -213,14 +244,9 @@ export async function runSync(
 				}
 				if (evt.type === "tool_result_end" && evt.message) {
 					result.messages.push(evt.message);
-					// Also capture tool result text in recentOutput for streaming display
 					const toolText = extractTextFromContent(evt.message.content);
 					if (toolText) {
-						const toolLines = toolText
-							.split("\n")
-							.filter((l) => l.trim())
-							.slice(-10);
-						// Append to existing recentOutput (keep last 50 total) - mutate in place for efficiency
+						const toolLines = toolText.split("\n").filter((l) => l.trim()).slice(-10);
 						progress.recentOutput.push(...toolLines);
 						if (progress.recentOutput.length > 50) {
 							progress.recentOutput.splice(0, progress.recentOutput.length - 50);
@@ -232,8 +258,6 @@ export async function runSync(
 				// Non-JSON stdout lines are expected; only structured events are parsed.
 			}
 		};
-
-		let stderrBuf = "";
 
 		proc.stdout.on("data", (d) => {
 			buf += d.toString();
@@ -319,7 +343,7 @@ export async function runSync(
 		if (artifactConfig?.includeMetadata !== false) {
 			writeMetadata(artifactPathsResult.metadataPath, {
 				runId,
-				agent: agentName,
+				agent: agent.name,
 				task,
 				exitCode: result.exitCode,
 				usage: result.usage,
@@ -353,10 +377,99 @@ export async function runSync(
 			?? (options.sessionDir ? findLatestSessionFile(options.sessionDir) : null);
 		if (sessionFile) {
 			result.sessionFile = sessionFile;
-			// HTML export disabled - module resolution issues with global pi installation
-			// Users can still access the session file directly
 		}
 	}
 
-	return result;
+	return {
+		ok: result.exitCode === 0,
+		result,
+		exitCode: result.exitCode,
+		error: result.error,
+		stderr: stderrBuf.trim() || undefined,
+		output: fullOutput,
+	};
+}
+
+/**
+ * Run a subagent synchronously (blocking until complete)
+ */
+export async function runSync(
+	runtimeCwd: string,
+	agents: AgentConfig[],
+	agentName: string,
+	task: string,
+	options: RunSyncOptions,
+): Promise<SingleResult> {
+	const agent = agents.find((a) => a.name === agentName);
+	if (!agent) {
+		return buildFailureResult(agentName, task, `Unknown agent: ${agentName}`);
+	}
+
+	const attemptResults: SingleResult[] = [];
+	const execution = await executeWithRuntimeModelFallback<SingleResult>({
+		context: options.runtimeModelContext,
+		modelOverride: options.modelOverride,
+		agentModel: agent.model,
+		agentThinking: agent.thinking,
+		makeFailureResult: (message) => buildFailureResult(agent.name, task, message),
+		executeAttempt: async (candidate) => {
+			const attempt = await runSyncAttempt(runtimeCwd, agent, task, options, candidate?.normalizedModel ?? candidate?.model);
+			attemptResults.push(attempt.result);
+			return attempt;
+		},
+		onAttemptEvent: (event) => {
+			const latestResult = attemptResults.at(-1);
+			if (!latestResult) return;
+			if (event.type === "retry") {
+				const nextModel = event.nextCandidate?.model ?? "next candidate";
+				emitFallbackUpdate(options.onUpdate, latestResult, `fallback: ${event.attempt.classification} (${event.attempt.reason}), trying ${nextModel}`);
+			} else if (event.type === "skipped") {
+				emitFallbackUpdate(options.onUpdate, latestResult, `fallback: skipped ${event.candidate.model} (${event.attempt.cooldownScope} cooldown)`);
+			} else if (event.type === "stop") {
+				emitFallbackUpdate(options.onUpdate, latestResult, `fallback: stopped on ${event.candidate.model} (${event.attempt.classification})`);
+			} else if (event.type === "exhausted") {
+				emitFallbackUpdate(options.onUpdate, latestResult, `fallback: exhausted ${event.attempts.length} candidates`);
+			}
+		},
+	});
+
+	const finalResult = execution.result;
+	finalResult.usage = mergeUsage(attemptResults);
+	finalResult.requestedModel = execution.requestedModel;
+	finalResult.finalModel = finalResult.model ?? execution.finalModel;
+	finalResult.modelAttempts = execution.modelAttempts;
+	finalResult.fallbackSummary = execution.fallbackSummary;
+	if (finalResult.progressSummary) {
+		finalResult.progressSummary.durationMs = attemptResults.reduce(
+			(total, result) => total + (result.progressSummary?.durationMs ?? 0),
+			0,
+		);
+		finalResult.progressSummary.toolCount = attemptResults.reduce(
+			(total, result) => total + (result.progressSummary?.toolCount ?? 0),
+			0,
+		);
+		finalResult.progressSummary.tokens = attemptResults.reduce(
+			(total, result) => total + (result.progressSummary?.tokens ?? 0),
+			0,
+		);
+	}
+	if (finalResult.progress) {
+		finalResult.progress.durationMs = attemptResults.reduce(
+			(total, result) => total + (result.progress?.durationMs ?? 0),
+			0,
+		);
+		finalResult.progress.toolCount = attemptResults.reduce(
+			(total, result) => total + (result.progress?.toolCount ?? 0),
+			0,
+		);
+		finalResult.progress.tokens = finalResult.usage.input + finalResult.usage.output;
+		finalResult.progress.status = finalResult.exitCode === 0 ? "completed" : "failed";
+		if (finalResult.fallbackSummary) {
+			finalResult.progress.recentOutput.push(finalResult.fallbackSummary);
+			if (finalResult.progress.recentOutput.length > 50) {
+				finalResult.progress.recentOutput.splice(0, finalResult.progress.recentOutput.length - 50);
+			}
+		}
+	}
+	return finalResult;
 }

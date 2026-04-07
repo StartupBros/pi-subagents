@@ -769,6 +769,35 @@ Notes:
 
 Sessions are always enabled — every subagent run gets a session directory for tracking.
 
+### Runtime model fallback
+
+Subagent execution can retry across a shared ordered model candidate list when a failure looks runtime-related instead of task-related.
+
+Candidate order:
+1. explicit model override from the tool call / TUI
+2. current session model (unless disabled)
+3. agent default model
+4. configured `fallbackModels`
+
+Config:
+
+```json
+{
+  "preferCurrentSessionModel": true,
+  "fallbackModels": [
+    "anthropic/claude-sonnet-4-5",
+    "google/gemini-2.5-pro"
+  ],
+  "cooldownMinutes": 15
+}
+```
+
+Notes:
+- cooldowns are session-scoped and file-backed, so sync and async runs share the same view
+- explicit overrides are always attempted first for the current run, even if that model is on cooldown from an earlier failure
+- deterministic failures stop immediately; only retryable runtime failures advance to the next candidate
+- results/status include `requestedModel`, `finalModel`, `modelAttempts`, and `fallbackSummary`
+
 ### `maxSubagentDepth`
 
 `maxSubagentDepth` sets the default recursion limit for nested delegation when no inherited `PI_SUBAGENT_MAX_DEPTH` is already in effect. Eg:
