@@ -20,14 +20,28 @@ describe("extension loading", { skip: !available ? "pi-test-harness not availabl
 	let t: any;
 
 	async function createCompatibleTestSession(options: Record<string, unknown>) {
-		const session = await createTestSession(options);
-		const agent = session.session?.agent as { setTools?: unknown; state?: { tools?: unknown } } | undefined;
+		const testSession = await createTestSession(options);
+		const agent = testSession.session?.agent as { setTools?: unknown; state?: { tools?: unknown } } | undefined;
 		if (agent && typeof agent.setTools !== "function" && agent.state) {
 			agent.setTools = (tools: unknown) => {
 				agent.state!.tools = tools;
 			};
 		}
-		return session;
+		const modelRegistry = (testSession.session as { _modelRegistry?: {
+			hasConfiguredAuth?: unknown;
+				isUsingOAuth?: unknown;
+				getApiKeyAndHeaders?: unknown;
+				getApiKey?: unknown;
+				getApiKeyForProvider?: unknown;
+			} })._modelRegistry;
+		if (modelRegistry) {
+			modelRegistry.hasConfiguredAuth = () => true;
+			modelRegistry.isUsingOAuth = () => false;
+			modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test-key", headers: {} });
+			modelRegistry.getApiKey = async () => "test-key";
+			modelRegistry.getApiKeyForProvider = async () => "test-key";
+		}
+		return testSession;
 	}
 
 	afterEach(() => t?.dispose());

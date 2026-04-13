@@ -37,6 +37,20 @@ async function createCompatibleTestSession(createTestSession: (options: Record<s
 			agent.state!.tools = tools;
 		};
 	}
+	const modelRegistry = (session.session as { _modelRegistry?: {
+		hasConfiguredAuth?: unknown;
+		isUsingOAuth?: unknown;
+		getApiKeyAndHeaders?: unknown;
+		getApiKey?: unknown;
+		getApiKeyForProvider?: unknown;
+	} })._modelRegistry;
+	if (modelRegistry) {
+		modelRegistry.hasConfiguredAuth = () => true;
+		modelRegistry.isUsingOAuth = () => false;
+		modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test-key", headers: {} });
+		modelRegistry.getApiKey = async () => "test-key";
+		modelRegistry.getApiKeyForProvider = async () => "test-key";
+	}
 	return session;
 }
 
