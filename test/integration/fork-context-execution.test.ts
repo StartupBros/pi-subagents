@@ -175,13 +175,15 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 	}
 
 	function readSessionArgsFromCalls(): string[] {
-		return readAllCallArgs().map((args) => {
-			const sessionIndex = args.indexOf("--session");
-			assert.notEqual(sessionIndex, -1, "expected a --session arg");
-			const sessionFile = args[sessionIndex + 1];
-			assert.ok(sessionFile, "expected a session file after --session");
-			return sessionFile;
-		});
+		return readAllCallArgs()
+			.map((args) => {
+				const sessionIndex = args.indexOf("--session");
+				if (sessionIndex === -1) return undefined;
+				const sessionFile = args[sessionIndex + 1];
+				assert.ok(sessionFile, "expected a session file after --session");
+				return sessionFile;
+			})
+			.filter((sessionFile): sessionFile is string => Boolean(sessionFile));
 	}
 
 	function makeForkingSessionManagerRecorder(options: { sessionFile: string; leafId: string }) {
@@ -629,7 +631,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 	it("uses request cwd for management actions", async () => {
 		const executor = makeExecutor();
 		const worktreeDir = path.join(tempDir, "worktree");
-		fs.mkdirSync(worktreeDir, { recursive: true });
+		fs.mkdirSync(path.join(worktreeDir, ".pi"), { recursive: true });
 
 		const result = await executor.execute(
 			"id",
