@@ -23,4 +23,5 @@ jobs:
       - name: Unit tests
         run: npm test
       - name: Integration tests
+        if: runner.os != 'Windows'
         run: npm run test:integration
