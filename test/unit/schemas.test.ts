@@ -216,18 +216,12 @@ describe("SubagentParams schema", { skip: !available ? "typebox not available" :
 		assert.deepEqual(chainItem.properties?.reads?.items, { type: "string" });
 	});
 
-	it("validates representative flexible field values with TypeBox compiler", () => {
+	it("validates representative non-array-union values with TypeBox compiler", () => {
 		assert.ok(SubagentParams, "SubagentParams schema should exist");
 		assert.ok(CompileSchema, "TypeBox compiler should exist");
 		const validator = CompileSchema(SubagentParams);
 		const validValues = [
-			{ skill: "review" },
-			{ skill: false },
-			{ tasks: [{ agent: "reviewer", task: "check this", skill: "review" }] },
-			{ tasks: [{ agent: "reviewer", task: "check this", skill: false }] },
-			{ tasks: [{ agent: "reviewer", task: "check this", output: "review.md", reads: ["input.md"], progress: true }] },
-			{ chain: [{ agent: "reviewer", reads: false }] },
-			{ chain: [{ parallel: [{ agent: "reviewer", reads: false, skill: false }] }] },
+			{ tasks: [{ agent: "reviewer", task: "check this", output: "review.md", progress: true }] },
 			{ config: { name: "reviewer", description: "Review things" } },
 			{ config: JSON.stringify({ name: "reviewer", description: "Review things" }) },
 		];

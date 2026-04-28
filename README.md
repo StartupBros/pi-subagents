@@ -233,7 +233,7 @@ Skip this section until you want exact syntax.
 | `/chain agent1 "task1" -> agent2 "task2"` | Run agents in sequence |
 | `/parallel agent1 "task1" -> agent2 "task2"` | Run agents in parallel |
 | `/run-chain <chainName> -- <task>` | Launch a saved `.chain.md` workflow |
-| `/agents` | Open the Agents Manager overlay |
+| `/agents` | Open the Agents Manager overlay (default; configurable via `managerCommand`) |
 | `/subagents-status` | Open the active/recent run overlay |
 | `/subagents-doctor` | Show read-only setup diagnostics |
 
@@ -340,6 +340,8 @@ Picker screens use `↑↓`, `Enter`, `Esc`, and type-to-filter. The full-screen
 ## Agents Manager
 
 Press `Ctrl+Shift+A` or type `/agents` to open the Agents Manager. It is the easiest way to browse, inspect, edit, create, and launch agents and chains.
+
+`/agents` is the default manager command. You can rename or disable it with `managerCommand` in config if another extension already owns `/agents`.
 
 Use it when you want to see what agents exist, adjust a builtin override, build a parallel run without writing slash syntax, or save a chain for later.
 
@@ -799,6 +801,14 @@ Forces depth-0 single, parallel, and chain runs into background mode and bypasse
 ```
 
 `maxTasks` defaults to `8`; `concurrency` defaults to `4`. Per-call `concurrency` takes precedence.
+
+### `managerCommand`
+
+```json
+{ "managerCommand": "subagents" }
+```
+
+Controls which slash command opens the Agents Manager overlay. Default: `"agents"`. Leading slashes are normalized, so `"/subagents"` works too. Set `false` to disable the manager command while keeping `Ctrl+Shift+A`.
 
 ### `defaultSessionDir`
 

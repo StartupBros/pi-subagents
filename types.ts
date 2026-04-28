@@ -394,6 +394,7 @@ export interface ExtensionConfig {
 	asyncByDefault?: boolean;
 	forceTopLevelAsync?: boolean;
 	defaultSessionDir?: string;
+	managerCommand?: string | false;
 	maxSubagentDepth?: number;
 	control?: ControlConfig;
 	parallel?: TopLevelParallelConfig;

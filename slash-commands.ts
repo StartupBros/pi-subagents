@@ -448,13 +448,16 @@ const parseAgentArgs = (
 export function registerSlashCommands(
 	pi: ExtensionAPI,
 	state: SubagentState,
+	managerCommand: string | false = "agents",
 ): void {
-	pi.registerCommand("agents", {
-		description: "Open the Agents Manager",
-		handler: async (_args, ctx) => {
-			await openAgentManager(pi, ctx);
-		},
-	});
+	if (managerCommand) {
+		pi.registerCommand(managerCommand, {
+			description: "Open the Agents Manager",
+			handler: async (_args, ctx) => {
+				await openAgentManager(pi, ctx);
+			},
+		});
+	}
 
 	pi.registerCommand("run", {
 		description: "Run a subagent directly: /run agent[output=file] [task] [--bg] [--fork]",
