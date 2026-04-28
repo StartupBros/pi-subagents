@@ -92,7 +92,7 @@ describe("finalizeSingleOutput", () => {
 		});
 
 		assert.match(result.displayOutput, /^\[TRUNCATED\]\nline 1/);
-		assert.match(result.displayOutput, /📄 Output saved to:/);
+		assert.match(result.displayOutput, /Output saved to:/);
 	});
 
 	it("does not add save messaging on failed runs", () => {

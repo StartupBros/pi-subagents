@@ -5,6 +5,8 @@ import {
 	getSubagentDepthEnv,
 	DEFAULT_SUBAGENT_MAX_DEPTH,
 	normalizeMaxSubagentDepth,
+	resolveTopLevelParallelConcurrency,
+	resolveTopLevelParallelMaxTasks,
 	resolveChildMaxSubagentDepth,
 	resolveCurrentMaxSubagentDepth,
 } from "../../types.ts";
@@ -59,6 +61,22 @@ describe("resolveCurrentMaxSubagentDepth", () => {
 		delete process.env.PI_SUBAGENT_MAX_DEPTH;
 		assert.equal(resolveCurrentMaxSubagentDepth(undefined), 2);
 		assert.equal(resolveCurrentMaxSubagentDepth(-1), 2);
+	});
+});
+
+describe("top-level parallel config helpers", () => {
+	it("resolves maxTasks from config or falls back to the default", () => {
+		assert.equal(resolveTopLevelParallelMaxTasks(12), 12);
+		assert.equal(resolveTopLevelParallelMaxTasks(undefined), 8);
+		assert.equal(resolveTopLevelParallelMaxTasks(0), 8);
+		assert.equal(resolveTopLevelParallelMaxTasks("oops"), 8);
+	});
+
+	it("resolves concurrency from per-call override, config, or default", () => {
+		assert.equal(resolveTopLevelParallelConcurrency(2, 6), 2);
+		assert.equal(resolveTopLevelParallelConcurrency(undefined, 6), 6);
+		assert.equal(resolveTopLevelParallelConcurrency(0, 6), 6);
+		assert.equal(resolveTopLevelParallelConcurrency(undefined, 0), 4);
 	});
 });
 

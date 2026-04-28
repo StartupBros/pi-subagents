@@ -1,9 +1,13 @@
 export type SubagentExecutionContext = "fresh" | "fork";
 
+interface ForkableSessionManagerStatic {
+	open(path: string): { createBranchedSession(leafId: string): string | undefined };
+}
+
 export interface ForkableSessionManager {
 	getSessionFile(): string | undefined;
 	getLeafId(): string | null;
-	createBranchedSession(leafId: string): string | undefined;
+	constructor: ForkableSessionManagerStatic;
 }
 
 export interface ForkContextResolver {
@@ -41,7 +45,8 @@ export function createForkContextResolver(
 			const cached = cachedSessionFiles.get(index);
 			if (cached) return cached;
 			try {
-				const sessionFile = sessionManager.createBranchedSession(leafId);
+				const sourceManager = sessionManager.constructor.open(parentSessionFile);
+				const sessionFile = sourceManager.createBranchedSession(leafId);
 				if (!sessionFile) {
 					throw new Error("Session manager did not return a session file.");
 				}

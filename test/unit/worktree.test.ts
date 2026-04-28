@@ -10,6 +10,7 @@ import {
 	diffWorktrees,
 	findWorktreeTaskCwdConflict,
 	formatWorktreeDiffSummary,
+	resolveExpectedWorktreeAgentCwd,
 	type WorktreeSetup,
 } from "../../worktree.ts";
 
@@ -91,6 +92,24 @@ describe("worktree", () => {
 		}
 	});
 
+	it("previews expected worktree agent cwd for repository subdirectories", () => {
+		const repoDir = createRepo("pi-worktree-preview-");
+		const nestedDir = path.join(repoDir, "packages", "app");
+		fs.mkdirSync(nestedDir, { recursive: true });
+		fs.writeFileSync(path.join(nestedDir, "index.ts"), "export const value = 1;\n", "utf-8");
+		git(repoDir, ["add", "-A"]);
+		git(repoDir, ["commit", "-m", "add nested dir"]);
+
+		try {
+			assert.equal(
+				resolveExpectedWorktreeAgentCwd(nestedDir, "preview", 2),
+				path.join(os.tmpdir(), "pi-worktree-preview-2", "packages", "app"),
+			);
+		} finally {
+			cleanupRepo(repoDir);
+		}
+	});
+
 	it("createWorktrees rejects dirty repositories", () => {
 		const repoDir = createRepo("pi-worktree-dirty-");
 		try {
@@ -112,6 +131,17 @@ describe("worktree", () => {
 					{ agent: "worker-a" },
 					{ agent: "worker-b", cwd: sharedCwd },
 				],
+				sharedCwd,
+			),
+			undefined,
+		);
+	});
+
+	it("findWorktreeTaskCwdConflict treats relative task cwd values as relative to the shared cwd", () => {
+		const sharedCwd = path.join("/tmp", "repo");
+		assert.equal(
+			findWorktreeTaskCwdConflict(
+				[{ agent: "worker-a", cwd: "." }],
 				sharedCwd,
 			),
 			undefined,

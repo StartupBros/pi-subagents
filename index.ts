@@ -9,7 +9,7 @@
  * Toggle: async parameter (default: false, configurable via config.json)
  *
  * Config file: ~/.pi/agent/extensions/subagent/config.json
- *   { "asyncByDefault": true, "managerCommand": "subagents", "maxSubagentDepth": 1, "worktreeSetupHook": "./scripts/setup-worktree.mjs" }
+ *   { "asyncByDefault": true, "managerCommand": "subagents", "forceTopLevelAsync": true, "maxSubagentDepth": 1, "intercomBridge": { "mode": "always", "instructionFile": "./intercom-bridge.md" }, "worktreeSetupHook": "./scripts/setup-worktree.mjs" }
  */
 
 import * as fs from "node:fs";
@@ -17,22 +17,25 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Spacer, Text } from "@mariozechner/pi-tui";
+import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@mariozechner/pi-tui";
 import { discoverAgents } from "./agents.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "./artifacts.ts";
 import { cleanupOldChainDirs } from "./settings.ts";
-import { renderWidget, renderSubagentResult } from "./render.ts";
-import { SubagentParams, StatusParams } from "./schemas.ts";
-import { findByPrefix, readStatus } from "./utils.ts";
+import { renderWidget, renderSubagentResult, stopResultAnimations, stopWidgetAnimation, syncResultAnimation } from "./render.ts";
+import { SubagentParams } from "./schemas.ts";
 import { createSubagentExecutor } from "./subagent-executor.ts";
 import { createAsyncJobTracker } from "./async-job-tracker.ts";
+import { controlNotificationKey, formatControlNoticeMessage } from "./subagent-control.ts";
 import { createResultWatcher } from "./result-watcher.ts";
 import { registerSlashCommands } from "./slash-commands.ts";
 import { registerPromptTemplateDelegationBridge } from "./prompt-template-bridge.ts";
 import { registerSlashSubagentBridge } from "./slash-bridge.ts";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "./slash-live-state.ts";
-import { formatAsyncRunList, listAsyncRuns } from "./async-status.ts";
+import { inspectSubagentStatus } from "./run-status.ts";
+import registerSubagentNotify, { type SubagentNotifyDetails } from "./notify.ts";
+import { formatDuration, shortenPath } from "./formatters.ts";
 import {
+	type ControlEvent,
 	type Details,
 	type ExtensionConfig,
 	type SubagentState,
@@ -40,6 +43,9 @@ import {
 	DEFAULT_ARTIFACT_CONFIG,
 	RESULTS_DIR,
 	SLASH_RESULT_TYPE,
+	SUBAGENT_ASYNC_COMPLETE_EVENT,
+	SUBAGENT_ASYNC_STARTED_EVENT,
+	SUBAGENT_CONTROL_EVENT,
 	WIDGET_KEY,
 } from "./types.ts";
 
@@ -75,11 +81,11 @@ function expandTilde(p: string): string {
 	return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
 }
 
-function getManagerCommand(config: ExtensionConfig): string | undefined {
-	if (config.managerCommand === false) return undefined;
+function getManagerCommand(config: ExtensionConfig): string | false {
+	if (config.managerCommand === false) return false;
 	if (typeof config.managerCommand === "string") {
 		const normalized = config.managerCommand.trim().replace(/^\/+/, "");
-		return normalized || undefined;
+		return normalized || false;
 	}
 	return "agents";
 }
@@ -134,12 +140,15 @@ function createSlashResultComponent(
 	details: SlashMessageDetails,
 	options: { expanded: boolean },
 	theme: ExtensionContext["ui"]["theme"],
+	requestRender: () => void,
 ): Container {
 	const container = new Container();
+	const animationState: { subagentResultAnimationTimer?: ReturnType<typeof setInterval> } = {};
 	let lastVersion = -1;
 	container.render = (width: number): string[] => {
 		const snapshot = getSlashRenderableSnapshot(details);
-		if (snapshot.version !== lastVersion) {
+		syncResultAnimation(snapshot.result, { state: animationState, invalidate: requestRender });
+		if (snapshot.version !== lastVersion || isSlashResultRunning(snapshot.result)) {
 			lastVersion = snapshot.version;
 			rebuildSlashResultContainer(container, snapshot.result, options, theme);
 		}
@@ -148,7 +157,102 @@ function createSlashResultComponent(
 	return container;
 }
 
+const SUBAGENT_CONTROL_MESSAGE_TYPE = "subagent_control_notice";
+
+interface SubagentControlMessageDetails {
+	event: ControlEvent;
+	source?: "foreground" | "async";
+	asyncDir?: string;
+	childIntercomTarget?: string;
+	noticeText?: string;
+}
+
+function controlNoticeTarget(details: SubagentControlMessageDetails): string | undefined {
+	return details.childIntercomTarget;
+}
+
+function formatSubagentControlNotice(details: SubagentControlMessageDetails, content?: string): string {
+	return details.noticeText ?? content ?? formatControlNoticeMessage(details.event, controlNoticeTarget(details));
+}
+
+function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | undefined {
+	const lines = content.split("\n");
+	const header = lines[0] ?? "";
+	const match = header.match(/^Background task (completed|failed|paused): \*\*(.+?)\*\*(?:\s+(\([^)]*\)))?$/);
+	if (!match) return undefined;
+	const body = lines.slice(2);
+	let sessionIndex = -1;
+	for (let i = body.length - 1; i >= 1; i--) {
+		if (body[i - 1]?.trim() === "" && /^(Session|Session file|Session share error):\s+/.test(body[i]!)) {
+			sessionIndex = i;
+			break;
+		}
+	}
+	const sessionLine = sessionIndex >= 0 ? body[sessionIndex] : undefined;
+	const resultLines = sessionIndex >= 0 ? body.slice(0, sessionIndex) : body;
+	const resultPreview = resultLines.join("\n").trim() || "(no output)";
+	let sessionLabel: string | undefined;
+	let sessionValue: string | undefined;
+	if (sessionLine) {
+		const separator = sessionLine.indexOf(":");
+		sessionLabel = sessionLine.slice(0, separator).toLowerCase();
+		sessionValue = sessionLine.slice(separator + 1).trim();
+	}
+	return {
+		agent: match[2]!,
+		status: match[1] as SubagentNotifyDetails["status"],
+		...(match[3] ? { taskInfo: match[3] } : {}),
+		resultPreview,
+		...(sessionLabel && sessionValue ? { sessionLabel, sessionValue } : {}),
+	};
+}
+
+class SubagentControlNoticeComponent implements Component {
+	private readonly details: SubagentControlMessageDetails;
+	private readonly theme: ExtensionContext["ui"]["theme"];
+
+	constructor(
+		details: SubagentControlMessageDetails,
+		theme: ExtensionContext["ui"]["theme"],
+	) {
+		this.details = details;
+		this.theme = theme;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const eventLabel = this.details.event.type.replaceAll("_", " ");
+		if (width < 3) return [truncateToWidth(`Subagent ${eventLabel}`, width)];
+		const bodyWidth = Math.max(1, Math.min(width - 2, 68));
+		const borderChar = "─";
+		const header = ` ⚠ Subagent ${eventLabel}: ${this.details.event.agent} `;
+		const headerText = truncateToWidth(header, bodyWidth, "");
+		const headerPadding = Math.max(0, bodyWidth - visibleWidth(headerText));
+		const lines = [this.theme.fg("accent", `╭${headerText}${borderChar.repeat(headerPadding)}╮`)];
+
+		for (const line of wrapTextWithAnsi(formatSubagentControlNotice(this.details), bodyWidth)) {
+			const text = truncateToWidth(line, bodyWidth, "");
+			const padding = Math.max(0, bodyWidth - visibleWidth(text));
+			lines.push(this.theme.fg("accent", `│${text}${" ".repeat(padding)}│`));
+		}
+		lines.push(this.theme.fg("accent", `╰${borderChar.repeat(bodyWidth)}╯`));
+		return lines;
+	}
+}
+
 export default function registerSubagentExtension(pi: ExtensionAPI): void {
+	const globalStore = globalThis as Record<string, unknown>;
+	const runtimeCleanupStoreKey = "__piSubagentRuntimeCleanup";
+	const previousRuntimeCleanup = globalStore[runtimeCleanupStoreKey];
+	if (typeof previousRuntimeCleanup === "function") {
+		try {
+			previousRuntimeCleanup();
+		} catch {
+			// Best effort cleanup for stale timers from an older reload.
+		}
+	}
+
 	ensureAccessibleDir(RESULTS_DIR);
 	ensureAccessibleDir(ASYNC_DIR);
 	cleanupOldChainDirs();
@@ -163,6 +267,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		baseCwd: process.cwd(),
 		currentSessionId: null,
 		asyncJobs: new Map(),
+		foregroundControls: new Map(),
+		lastForegroundControlId: null,
 		cleanupTimers: new Map(),
 		lastUiContext: null,
 		poller: null,
@@ -184,7 +290,17 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	startResultWatcher();
 	primeExistingResults();
 
-	const { ensurePoller, handleStarted, handleComplete, resetJobs } = createAsyncJobTracker(state, ASYNC_DIR);
+	const runtimeCleanup = () => {
+		stopWidgetAnimation();
+		stopResultAnimations();
+		if (state.poller) {
+			clearInterval(state.poller);
+			state.poller = null;
+		}
+	};
+	globalStore[runtimeCleanupStoreKey] = runtimeCleanup;
+
+	const { ensurePoller, handleStarted, handleComplete, resetJobs } = createAsyncJobTracker(pi, state, ASYNC_DIR);
 	const executor = createSubagentExecutor({
 		pi,
 		state,
@@ -199,7 +315,44 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	pi.registerMessageRenderer<SlashMessageDetails>(SLASH_RESULT_TYPE, (message, options, theme) => {
 		const details = resolveSlashMessageDetails(message.details);
 		if (!details) return undefined;
-		return createSlashResultComponent(details, options, theme);
+		return createSlashResultComponent(details, options, theme, () => state.lastUiContext?.ui.requestRender?.());
+	});
+
+	pi.registerMessageRenderer<SubagentNotifyDetails>("subagent-notify", (message, options, theme) => {
+		const content = typeof message.content === "string" ? message.content : "";
+		const details = (message.details as SubagentNotifyDetails | undefined) ?? parseSubagentNotifyContent(content);
+		if (!details) return new Text(content, 0, 0);
+		const icon = details.status === "completed"
+			? theme.fg("success", "✓")
+			: details.status === "paused"
+				? theme.fg("warning", "■")
+				: theme.fg("error", "✗");
+		const parts: string[] = [];
+		if (details.taskInfo) parts.push(details.taskInfo);
+		if (details.durationMs !== undefined) parts.push(formatDuration(details.durationMs));
+		let text = `${icon} ${theme.bold(details.agent)} ${theme.fg("dim", details.status)}`;
+		if (parts.length > 0) text += ` ${theme.fg("dim", "·")} ${parts.map((part) => theme.fg("dim", part)).join(` ${theme.fg("dim", "·")} `)}`;
+		const trimmedPreview = details.resultPreview.trim();
+		const previewLines = options.expanded
+			? trimmedPreview.split("\n").filter((line) => line.trim())
+			: [trimmedPreview.split("\n", 1)[0] ?? ""].filter((line) => line.trim());
+		for (const line of previewLines.length > 0 ? previewLines : ["(no output)"]) {
+			text += `\n  ${theme.fg("dim", `⎿  ${line}`)}`;
+		}
+		if (!options.expanded && trimmedPreview.includes("\n")) {
+			text += `\n  ${theme.fg("dim", "Ctrl+O full notification")}`;
+		}
+		if (details.sessionLabel && details.sessionValue) {
+			text += `\n  ${theme.fg("muted", `${details.sessionLabel}: ${shortenPath(details.sessionValue)}`)}`;
+		}
+		return new Text(text, 0, 0);
+	});
+
+	pi.registerMessageRenderer<SubagentControlMessageDetails>(SUBAGENT_CONTROL_MESSAGE_TYPE, (message, _options, theme) => {
+		const details = message.details as SubagentControlMessageDetails | undefined;
+		if (!details?.event) return undefined;
+		const content = typeof message.content === "string" ? message.content : undefined;
+		return new SubagentControlNoticeComponent({ ...details, noticeText: formatSubagentControlNotice(details, content) }, theme);
 	});
 
 	const slashBridge = registerSlashSubagentBridge({
@@ -261,25 +414,33 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		description: `Delegate to subagents or manage agent definitions.
 
 EXECUTION (use exactly ONE mode):
-• SINGLE: { agent, task } - one task
-• CHAIN: { chain: [{agent:"scout"}, {parallel:[{agent:"worker",count:3}]}] } - sequential pipeline with optional parallel fan-out
-• PARALLEL: { tasks: [{agent,task,count?}, ...], worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
+• Before executing, use { action: "list" } to inspect configured agents/chains. Only execute agents listed as executable/non-disabled.
+• SINGLE: { agent, task? } - one task; omit task for self-contained agents
+• CHAIN: { chain: [{agent:"agent-a"}, {parallel:[{agent:"agent-b",count:3}]}] } - sequential pipeline with optional parallel fan-out
+• PARALLEL: { tasks: [{agent,task,count?,output?,reads?,progress?}, ...], concurrency?: number, worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
 • Optional context: { context: "fresh" | "fork" } (default: "fresh")
 
 CHAIN TEMPLATE VARIABLES (use in task strings):
 • {task} - The original task/request from the user
 • {previous} - Text response from the previous step (empty for first step)
-• {chain_dir} - Shared directory for chain files (e.g., <tmpdir>/pi-chain-runs/abc123/)
+• {chain_dir} - Shared directory for chain files (e.g., <tmpdir>/pi-subagents-<scope>/chain-runs/abc123/)
 
-Example: { chain: [{agent:"scout", task:"Analyze {task}"}, {agent:"planner", task:"Plan based on {previous}"}] }
+Example: { chain: [{agent:"agent-a", task:"Analyze {task}"}, {agent:"agent-b", task:"Plan based on {previous}"}] }
 
 MANAGEMENT (use action field, omit agent/task/chain/tasks):
-• { action: "list" } - discover agents/chains
-• { action: "get", agent: "name" } - full agent detail
-• { action: "create", config: { name, systemPrompt, ... } }
+• { action: "list" } - discover executable agents/chains and any disabled builtins
+• { action: "get", agent: "name" } - full detail
+• { action: "create", config: { name, systemPrompt, systemPromptMode, inheritProjectContext, inheritSkills, ... } }
 • { action: "update", agent: "name", config: { ... } } - merge
 • { action: "delete", agent: "name" }
-• Use chainName for chain operations`,
+• Use chainName for chain operations
+
+CONTROL:
+• { action: "status", id: "..." } - inspect an async/background run by id or prefix
+• { action: "interrupt", id?: "..." } - soft-interrupt the current child turn and leave the run paused
+
+DIAGNOSTICS:
+• { action: "doctor" } - read-only report for runtime paths, discovery, sessions, and intercom`,
 		parameters: SubagentParams,
 
 		execute(id, params, signal, onUpdate, ctx) {
@@ -316,136 +477,58 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 			);
 		},
 
-		renderResult(result, options, theme) {
+		renderResult(result, options, theme, context) {
+			syncResultAnimation(result, context);
 			return renderSubagentResult(result, options, theme);
 		},
 
 	};
 
-	const statusTool: ToolDefinition<typeof StatusParams, Details> = {
-		name: "subagent_status",
-		label: "Subagent Status",
-		description: "Inspect async subagent run status and artifacts",
-		parameters: StatusParams,
-
-		async execute(_id, params, _signal, _onUpdate, _ctx) {
-			if (params.action === "list") {
-				try {
-					const runs = listAsyncRuns(ASYNC_DIR, { states: ["queued", "running"] });
-					return {
-						content: [{ type: "text", text: formatAsyncRunList(runs) }],
-						details: { mode: "single", results: [] },
-					};
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					return {
-						content: [{ type: "text", text: message }],
-						isError: true,
-						details: { mode: "single", results: [] },
-					};
-				}
-			}
-
-			let asyncDir: string | null = null;
-			let resolvedId = params.id;
-
-			if (params.dir) {
-				asyncDir = path.resolve(params.dir);
-			} else if (params.id) {
-				const direct = path.join(ASYNC_DIR, params.id);
-				if (fs.existsSync(direct)) {
-					asyncDir = direct;
-				} else {
-					const match = findByPrefix(ASYNC_DIR, params.id);
-					if (match) {
-						asyncDir = match;
-						resolvedId = path.basename(match);
-					}
-				}
-			}
-
-			const resultPath =
-				params.id && !asyncDir ? findByPrefix(RESULTS_DIR, params.id, ".json") : null;
-
-			if (!asyncDir && !resultPath) {
-				return {
-					content: [{ type: "text", text: "Async run not found. Provide id or dir." }],
-					isError: true,
-					details: { mode: "single" as const, results: [] },
-				};
-			}
-
-			if (asyncDir) {
-				let status;
-				try {
-					status = readStatus(asyncDir);
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					return {
-						content: [{ type: "text", text: message }],
-						isError: true,
-						details: { mode: "single" as const, results: [] },
-					};
-				}
-				const logPath = path.join(asyncDir, `subagent-log-${resolvedId ?? "unknown"}.md`);
-				const eventsPath = path.join(asyncDir, "events.jsonl");
-				if (status) {
-					const stepsTotal = status.steps?.length ?? 1;
-					const current = status.currentStep !== undefined ? status.currentStep + 1 : undefined;
-					const stepLine =
-						current !== undefined ? `Step: ${current}/${stepsTotal}` : `Steps: ${stepsTotal}`;
-					const started = new Date(status.startedAt).toISOString();
-					const updated = status.lastUpdate ? new Date(status.lastUpdate).toISOString() : "n/a";
-
-					const lines = [
-						`Run: ${status.runId}`,
-						`State: ${status.state}`,
-						`Mode: ${status.mode}`,
-						stepLine,
-						`Started: ${started}`,
-						`Updated: ${updated}`,
-						`Dir: ${asyncDir}`,
-					];
-					if (status.sessionFile) lines.push(`Session: ${status.sessionFile}`);
-					if (fs.existsSync(logPath)) lines.push(`Log: ${logPath}`);
-					if (fs.existsSync(eventsPath)) lines.push(`Events: ${eventsPath}`);
-
-					return { content: [{ type: "text", text: lines.join("\n") }], details: { mode: "single", results: [] } };
-				}
-			}
-
-			if (resultPath) {
-				try {
-					const raw = fs.readFileSync(resultPath, "utf-8");
-					const data = JSON.parse(raw) as { id?: string; success?: boolean; summary?: string };
-					const status = data.success ? "complete" : "failed";
-					const lines = [`Run: ${data.id ?? params.id}`, `State: ${status}`, `Result: ${resultPath}`];
-					if (data.summary) lines.push("", data.summary);
-					return { content: [{ type: "text", text: lines.join("\n") }], details: { mode: "single", results: [] } };
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					return {
-						content: [{ type: "text", text: `Failed to read async result file: ${message}` }],
-						isError: true,
-						details: { mode: "single" as const, results: [] },
-					};
-				}
-			}
-
-			return {
-				content: [{ type: "text", text: "Status file not found." }],
-				isError: true,
-				details: { mode: "single" as const, results: [] },
-			};
-		},
-	};
-
 	pi.registerTool(tool);
-	pi.registerTool(statusTool);
 	registerSlashCommands(pi, state, managerCommand);
 
-	pi.events.on("subagent:started", handleStarted);
-	pi.events.on("subagent:complete", handleComplete);
+	const eventUnsubscribeStoreKey = "__piSubagentEventUnsubscribes";
+	const controlNoticeSeenStoreKey = "__piSubagentVisibleControlNotices";
+	const previousEventUnsubscribes = globalStore[eventUnsubscribeStoreKey];
+	if (Array.isArray(previousEventUnsubscribes)) {
+		for (const unsubscribe of previousEventUnsubscribes) {
+			if (typeof unsubscribe !== "function") continue;
+			try {
+				unsubscribe();
+			} catch {
+				// Best effort cleanup for stale handlers from an older reload.
+			}
+		}
+	}
+	registerSubagentNotify(pi);
+
+	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
+	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();
+	globalStore[controlNoticeSeenStoreKey] = visibleControlNotices;
+	const controlEventHandler = (payload: unknown) => {
+		const details = payload as SubagentControlMessageDetails;
+		if (!details?.event) return;
+		const childIntercomTarget = controlNoticeTarget(details);
+		const key = controlNotificationKey(details.event, childIntercomTarget);
+		if (visibleControlNotices.has(key)) return;
+		visibleControlNotices.add(key);
+		const noticeText = details.noticeText ?? formatControlNoticeMessage(details.event, childIntercomTarget);
+		pi.sendMessage(
+			{
+				customType: SUBAGENT_CONTROL_MESSAGE_TYPE,
+				content: noticeText,
+				display: true,
+				details: { ...details, childIntercomTarget, noticeText },
+			},
+			{ triggerTurn: true },
+		);
+	};
+	const eventUnsubscribes = [
+		pi.events.on(SUBAGENT_ASYNC_STARTED_EVENT, handleStarted),
+		pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete),
+		pi.events.on(SUBAGENT_CONTROL_EVENT, controlEventHandler),
+	];
+	globalStore[eventUnsubscribeStoreKey] = eventUnsubscribes;
 
 	pi.on("tool_result", (event, ctx) => {
 		if (event.toolName !== "subagent") return;
@@ -481,6 +564,16 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 		resetSessionState(ctx);
 	});
 	pi.on("session_shutdown", () => {
+		for (const unsubscribe of eventUnsubscribes) {
+			try {
+				unsubscribe();
+			} catch {
+				// Best effort cleanup during shutdown.
+			}
+		}
+		if (globalStore[eventUnsubscribeStoreKey] === eventUnsubscribes) {
+			delete globalStore[eventUnsubscribeStoreKey];
+		}
 		stopResultWatcher();
 		if (state.poller) clearInterval(state.poller);
 		state.poller = null;
@@ -494,6 +587,11 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 		slashBridge.dispose();
 		promptTemplateBridge.cancelAll();
 		promptTemplateBridge.dispose();
+		stopWidgetAnimation();
+		stopResultAnimations();
+		if (globalStore[runtimeCleanupStoreKey] === runtimeCleanup) {
+			delete globalStore[runtimeCleanupStoreKey];
+		}
 		if (state.lastUiContext?.hasUI) {
 			state.lastUiContext.ui.setWidget(WIDGET_KEY, undefined);
 		}

@@ -8,6 +8,9 @@ import {
 	type AgentSource,
 	type ChainConfig,
 	type ChainStepConfig,
+	defaultInheritProjectContext,
+	defaultInheritSkills,
+	defaultSystemPromptMode,
 	discoverAgentsAll,
 } from "./agents.ts";
 import { serializeAgent } from "./agent-serializer.ts";
@@ -35,13 +38,18 @@ function parseCsv(value: string): string[] {
 	return [...new Set(value.split(",").map((v) => v.trim()).filter(Boolean))];
 }
 
-function configObject(config: unknown): Record<string, unknown> | undefined {
+function configObject(config: unknown): { value?: Record<string, unknown>; error?: string } {
 	let val = config;
 	if (typeof val === "string") {
-		try { val = JSON.parse(val); } catch { return undefined; }
+		try {
+			val = JSON.parse(val);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return { error: `config must be valid JSON: ${message}` };
+		}
 	}
-	if (!val || typeof val !== "object" || Array.isArray(val)) return undefined;
-	return val as Record<string, unknown>;
+	if (!val || typeof val !== "object" || Array.isArray(val)) return {};
+	return { value: val as Record<string, unknown> };
 }
 
 function hasKey(obj: Record<string, unknown>, key: string): boolean {
@@ -130,6 +138,13 @@ function modelWarning(ctx: ManagementContext, model: string | undefined): string
 	return found ? undefined : `Warning: model '${model}' is not in the current model registry.`;
 }
 
+function fallbackModelsWarning(ctx: ManagementContext, fallbackModels: string[] | undefined): string | undefined {
+	if (!fallbackModels || fallbackModels.length === 0) return undefined;
+	const available = new Set(ctx.modelRegistry.getAvailable().flatMap((m) => [`${m.provider}/${m.id}`, m.id]));
+	const missing = fallbackModels.filter((model) => !available.has(model));
+	return missing.length ? `Warning: fallback models not in the current model registry: ${missing.join(", ")}.` : undefined;
+}
+
 function skillsWarning(cwd: string, skills: string[] | undefined): string | undefined {
 	if (!skills || skills.length === 0) return undefined;
 	const available = new Set(discoverAvailableSkills(cwd).map((s) => s.name));
@@ -198,6 +213,19 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 		else if (typeof cfg.model === "string") target.model = cfg.model.trim() || undefined;
 		else return "config.model must be a string or false when provided.";
 	}
+	if (hasKey(cfg, "fallbackModels")) {
+		if (cfg.fallbackModels === false || cfg.fallbackModels === "") target.fallbackModels = undefined;
+		else if (typeof cfg.fallbackModels === "string") {
+			const models = parseCsv(cfg.fallbackModels);
+			target.fallbackModels = models.length ? models : undefined;
+		} else if (Array.isArray(cfg.fallbackModels)) {
+			const models = cfg.fallbackModels
+				.filter((value): value is string => typeof value === "string")
+				.map((value) => value.trim())
+				.filter(Boolean);
+			target.fallbackModels = models.length ? [...new Set(models)] : undefined;
+		} else return "config.fallbackModels must be a comma-separated string, string array, or false when provided.";
+	}
 	if (hasKey(cfg, "tools")) {
 		if (cfg.tools === false || cfg.tools === "") { target.tools = undefined; target.mcpDirectTools = undefined; }
 		else if (typeof cfg.tools === "string") { const parsed = parseTools(cfg.tools); target.tools = parsed.tools; target.mcpDirectTools = parsed.mcpDirectTools; }
@@ -218,6 +246,18 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 		if (cfg.thinking === false || cfg.thinking === "") target.thinking = undefined;
 		else if (typeof cfg.thinking === "string") target.thinking = cfg.thinking.trim() || undefined;
 		else return "config.thinking must be a string or false when provided.";
+	}
+	if (hasKey(cfg, "systemPromptMode")) {
+		if (cfg.systemPromptMode === "append" || cfg.systemPromptMode === "replace") target.systemPromptMode = cfg.systemPromptMode;
+		else return "config.systemPromptMode must be 'append' or 'replace' when provided.";
+	}
+	if (hasKey(cfg, "inheritProjectContext")) {
+		if (typeof cfg.inheritProjectContext !== "boolean") return "config.inheritProjectContext must be a boolean when provided.";
+		target.inheritProjectContext = cfg.inheritProjectContext;
+	}
+	if (hasKey(cfg, "inheritSkills")) {
+		if (typeof cfg.inheritSkills !== "boolean") return "config.inheritSkills must be a boolean when provided.";
+		target.inheritSkills = cfg.inheritSkills;
 	}
 	if (hasKey(cfg, "output")) {
 		if (cfg.output === false || cfg.output === "") target.output = undefined;
@@ -292,8 +332,13 @@ export function formatAgentDetail(agent: AgentConfig): string {
 	const tools = [...(agent.tools ?? []), ...(agent.mcpDirectTools ?? []).map((t) => `mcp:${t}`)];
 	const lines: string[] = [`Agent: ${agent.name} (${agent.source})`, `Path: ${agent.filePath}`, `Description: ${agent.description}`];
 	if (agent.model) lines.push(`Model: ${agent.model}`);
+	if (agent.fallbackModels?.length) lines.push(`Fallback models: ${agent.fallbackModels.join(", ")}`);
 	if (tools.length) lines.push(`Tools: ${tools.join(", ")}`);
 	if (agent.skills?.length) lines.push(`Skills: ${agent.skills.join(", ")}`);
+	lines.push(`System prompt mode: ${agent.systemPromptMode}`);
+	lines.push(`Inherit project context: ${agent.inheritProjectContext ? "true" : "false"}`);
+	lines.push(`Inherit skills: ${agent.inheritSkills ? "true" : "false"}`);
+	if (agent.source === "builtin") lines.push(`Disabled: ${agent.disabled ? "true" : "false"}`);
 	if (agent.extensions !== undefined) lines.push(`Extensions: ${agent.extensions.length ? agent.extensions.join(", ") : "(none)"}`);
 	if (agent.thinking) lines.push(`Thinking: ${agent.thinking}`);
 	if (agent.output) lines.push(`Output: ${agent.output}`);
@@ -325,9 +370,18 @@ export function formatChainDetail(chain: ChainConfig): string {
 export function handleList(params: ManagementParams, ctx: ManagementContext): AgentToolResult<Details> {
 	const scope = normalizeListScope(params.agentScope) ?? "both";
 	const d = discoverAgentsAll(ctx.cwd);
-	const agents = allAgents(d).filter((a) => scope === "both" || a.source === "builtin" || a.source === scope).sort((a, b) => a.name.localeCompare(b.name));
+	const scopedAgents = allAgents(d).filter((a) => scope === "both" || a.source === "builtin" || a.source === scope).sort((a, b) => a.name.localeCompare(b.name));
+	const agents = scopedAgents.filter((a) => !a.disabled);
+	const disabledBuiltins = scopedAgents.filter((a) => a.source === "builtin" && a.disabled);
 	const chains = d.chains.filter((c) => scope === "both" || c.source === scope).sort((a, b) => a.name.localeCompare(b.name));
-	const lines = ["Agents:", ...(agents.length ? agents.map((a) => `- ${a.name} (${a.source}): ${a.description}`) : ["- (none)"]), "", "Chains:", ...(chains.length ? chains.map((c) => `- ${c.name} (${c.source}): ${c.description}`) : ["- (none)"])];
+	const lines = [
+		"Executable agents:",
+		...(agents.length ? agents.map((a) => `- ${a.name} (${a.source}): ${a.description}`) : ["- (none)"]),
+		...(disabledBuiltins.length ? ["", "Disabled builtins:", ...disabledBuiltins.map((a) => `- ${a.name} (${a.source}, disabled): ${a.description}`)] : []),
+		"",
+		"Chains:",
+		...(chains.length ? chains.map((c) => `- ${c.name} (${c.source}): ${c.description}`) : ["- (none)"]),
+	];
 	return result(lines.join("\n"));
 }
 
@@ -362,7 +416,9 @@ export function handleGet(params: ManagementParams, ctx: ManagementContext): Age
 }
 
 export function handleCreate(params: ManagementParams, ctx: ManagementContext): AgentToolResult<Details> {
-	const cfg = configObject(params.config);
+	const parsedConfig = configObject(params.config);
+	if (parsedConfig.error) return result(parsedConfig.error, true);
+	const cfg = parsedConfig.value;
 	if (!cfg) return result("config required for create.", true);
 	if (typeof cfg.name !== "string" || !cfg.name.trim()) return result("config.name is required and must be a non-empty string.", true);
 	if (typeof cfg.description !== "string" || !cfg.description.trim()) return result("config.description is required and must be a non-empty string.", true);
@@ -390,11 +446,22 @@ export function handleCreate(params: ManagementParams, ctx: ManagementContext): 
 		warnings.push(...chainStepWarnings(ctx, chain.steps));
 		return result([`Created chain '${name}' at ${targetPath}.`, ...warnings].join("\n"));
 	}
-	const agent: AgentConfig = { name, description: cfg.description.trim(), source: scope, filePath: targetPath, systemPrompt: "" };
+	const agent: AgentConfig = {
+		name,
+		description: cfg.description.trim(),
+		source: scope,
+		filePath: targetPath,
+		systemPrompt: "",
+		systemPromptMode: defaultSystemPromptMode(name),
+		inheritProjectContext: defaultInheritProjectContext(name),
+		inheritSkills: defaultInheritSkills(),
+	};
 	const applyError = applyAgentConfig(agent, cfg);
 	if (applyError) return result(applyError, true);
 	const mw = modelWarning(ctx, agent.model);
 	if (mw) warnings.push(mw);
+	const fmw = fallbackModelsWarning(ctx, agent.fallbackModels);
+	if (fmw) warnings.push(fmw);
 	const sw = skillsWarning(ctx.cwd, agent.skills);
 	if (sw) warnings.push(sw);
 	fs.writeFileSync(targetPath, serializeAgent(agent), "utf-8");
@@ -404,7 +471,9 @@ export function handleCreate(params: ManagementParams, ctx: ManagementContext): 
 export function handleUpdate(params: ManagementParams, ctx: ManagementContext): AgentToolResult<Details> {
 	if (!params.agent && !params.chainName) return result("Specify 'agent' or 'chainName' for update.", true);
 	if (params.agent && params.chainName) return result("Specify either 'agent' or 'chainName', not both.", true);
-	const cfg = configObject(params.config);
+	const parsedConfig = configObject(params.config);
+	if (parsedConfig.error) return result(parsedConfig.error, true);
+	const cfg = parsedConfig.value;
 	if (!cfg) return result("config required for update.", true);
 	const warnings: string[] = [];
 	if (params.agent) {
@@ -414,7 +483,6 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 		const target = targetOrError;
 		const updated: AgentConfig = { ...target };
 		const oldName = target.name;
-		// Validate all fields before any filesystem mutation
 		if (hasKey(cfg, "name") && (typeof cfg.name !== "string" || !cfg.name.trim())) return result("config.name must be a non-empty string when provided.", true);
 		if (hasKey(cfg, "description") && (typeof cfg.description !== "string" || !cfg.description.trim())) return result("config.description must be a non-empty string when provided.", true);
 		let newName: string | undefined;
@@ -424,18 +492,20 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 		}
 		const applyError = applyAgentConfig(updated, cfg);
 		if (applyError) return result(applyError, true);
-		// Apply name/description (validated above)
 		if (newName !== undefined) updated.name = newName;
 		if (hasKey(cfg, "description")) updated.description = (cfg.description as string).trim();
 		if (hasKey(cfg, "model")) {
 			const mw = modelWarning(ctx, updated.model);
 			if (mw) warnings.push(mw);
 		}
+		if (hasKey(cfg, "fallbackModels")) {
+			const fmw = fallbackModelsWarning(ctx, updated.fallbackModels);
+			if (fmw) warnings.push(fmw);
+		}
 		if (hasKey(cfg, "skills")) {
 			const sw = skillsWarning(ctx.cwd, updated.skills);
 			if (sw) warnings.push(sw);
 		}
-		// Filesystem mutations last
 		if (updated.name !== oldName) {
 			const renamed = renamePath("agent", target.filePath, updated.name, target.source, ctx.cwd);
 			if (renamed.error) return result(renamed.error, true);
@@ -457,7 +527,6 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 	const target = targetOrError;
 	const updated: ChainConfig = { ...target, steps: [...target.steps] };
 	const oldName = target.name;
-	// Validate all fields before any filesystem mutation
 	if (hasKey(cfg, "name") && (typeof cfg.name !== "string" || !cfg.name.trim())) return result("config.name must be a non-empty string when provided.", true);
 	if (hasKey(cfg, "description") && (typeof cfg.description !== "string" || !cfg.description.trim())) return result("config.description must be a non-empty string when provided.", true);
 	let newName: string | undefined;
@@ -471,7 +540,6 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 		if (parsed.error) return result(parsed.error, true);
 		parsedSteps = parsed.steps!;
 	}
-	// Apply validated changes to in-memory object
 	if (newName !== undefined) updated.name = newName;
 	if (hasKey(cfg, "description")) updated.description = (cfg.description as string).trim();
 	if (parsedSteps) {
@@ -480,7 +548,6 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 		if (missing.length) warnings.push(`Warning: chain steps reference unknown agents: ${missing.join(", ")}.`);
 		warnings.push(...chainStepWarnings(ctx, updated.steps));
 	}
-	// Filesystem mutations last
 	if (updated.name !== oldName) {
 		const renamed = renamePath("chain", target.filePath, updated.name, target.source, ctx.cwd);
 		if (renamed.error) return result(renamed.error, true);

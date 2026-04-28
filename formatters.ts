@@ -5,7 +5,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Usage, SingleResult } from "./types.ts";
-import type { ChainStep, SequentialStep } from "./settings.ts";
+import type { ChainStep } from "./settings.ts";
 import { isParallelStep } from "./settings.ts";
 
 /**
@@ -49,16 +49,13 @@ export function buildChainSummary(
 	status: "completed" | "failed",
 	failedStep?: { index: number; error: string },
 ): string {
-	// Build step names for display
 	const stepNames = steps
-		.map((s) => (isParallelStep(s) ? `parallel[${s.parallel.length}]` : (s as SequentialStep).agent))
+		.map((step) => (isParallelStep(step) ? `parallel[${step.parallel.length}]` : step.agent))
 		.join(" → ");
 
-	// Calculate total duration from results
 	const totalDuration = results.reduce((sum, r) => sum + (r.progress?.durationMs || 0), 0);
 	const durationStr = formatDuration(totalDuration);
 
-	// Check for progress.md
 	const progressPath = path.join(chainDir, "progress.md");
 	const hasProgress = fs.existsSync(progressPath);
 	const allSkills = new Set<string>();
@@ -86,19 +83,27 @@ export function buildChainSummary(
 /**
  * Format a tool call for display
  */
-export function formatToolCall(name: string, args: Record<string, unknown>): string {
+export function formatToolCall(name: string, args: Record<string, unknown>, expanded = false): string {
 	switch (name) {
-		case "bash":
-			return `$ ${((args.command as string) || "").slice(0, 60)}${(args.command as string)?.length > 60 ? "..." : ""}`;
+		case "bash": {
+			const command = typeof args.command === "string" ? args.command : "";
+			const maxLength = expanded ? 240 : 60;
+			return `$ ${command.slice(0, maxLength)}${command.length > maxLength ? "..." : ""}`;
+		}
 		case "read":
-			return `read ${shortenPath((args.path || args.file_path || "") as string)}`;
 		case "write":
-			return `write ${shortenPath((args.path || args.file_path || "") as string)}`;
-		case "edit":
-			return `edit ${shortenPath((args.path || args.file_path || "") as string)}`;
+		case "edit": {
+			const target = typeof args.path === "string"
+				? args.path
+				: typeof args.file_path === "string"
+					? args.file_path
+					: "";
+			return `${name} ${shortenPath(target)}`;
+		}
 		default: {
 			const s = JSON.stringify(args);
-			return `${name} ${s.slice(0, 40)}${s.length > 40 ? "..." : ""}`;
+			const maxLength = expanded ? 160 : 40;
+			return `${name} ${s.slice(0, maxLength)}${s.length > maxLength ? "..." : ""}`;
 		}
 	}
 }
@@ -108,7 +113,6 @@ export function formatToolCall(name: string, args: Record<string, unknown>): str
  */
 export function shortenPath(p: string): string {
 	const home = process.env.HOME;
-	// Only shorten if HOME is defined and non-empty, and path starts with it
 	if (home && p.startsWith(home)) {
 		return `~${p.slice(home.length)}`;
 	}

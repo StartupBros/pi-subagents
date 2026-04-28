@@ -9,6 +9,8 @@ export interface ListAgent {
 	description: string;
 	model?: string;
 	source: AgentSource;
+	overrideScope?: "user" | "project";
+	disabled?: boolean;
 	kind: "agent" | "chain";
 	stepCount?: number;
 }
@@ -190,7 +192,7 @@ export function renderList(
 		const innerW = width - 2;
 		const nameWidth = 16;
 		const modelWidth = 12;
-		const scopeWidth = 9;
+		const scopeWidth = 21;
 
 		for (let i = 0; i < visible.length; i++) {
 			const agent = visible[i]!;
@@ -199,16 +201,24 @@ export function renderList(
 			const count = selectionCount(state.selected, agent.id);
 			const isShadowed = agent.kind === "agent" && agent.source === "project" && userNames.has(agent.name);
 
-			const cursorChar = isCursor ? theme.fg("accent", "▸") : " ";
-			const selectBadge = count > 1 ? theme.fg("accent", `×${count}`.padStart(2)) : count === 1 ? theme.fg("accent", " ✓") : "  ";
-			const shadowMarker = isShadowed ? theme.fg("warning", "●") : " ";
+			const cursorChar = isCursor ? theme.fg("accent", ">") : " ";
+			const selectBadge = count > 0 ? theme.fg("accent", String(count).padStart(2)) : "  ";
+			const shadowMarker = isShadowed ? theme.fg("warning", "!") : " ";
 			const prefix = `${cursorChar}${selectBadge}${shadowMarker} `;
 
 			const modelRaw = agent.kind === "chain" ? `${agent.stepCount ?? 0} steps` : (agent.model ?? "default");
 			const modelDisplay = modelRaw.includes("/") ? modelRaw.split("/").pop() ?? modelRaw : modelRaw;
 			const nameText = isCursor ? theme.fg("accent", agent.name) : agent.name;
 			const modelText = theme.fg("dim", modelDisplay);
-			const scopeLabel = agent.kind === "chain" ? "[chain]" : agent.source === "builtin" ? "[builtin]" : agent.source === "project" ? "[proj]" : "[user]";
+			const scopeLabel = agent.kind === "chain"
+				? "[chain]"
+				: agent.source === "builtin"
+					? (agent.disabled
+						? (agent.overrideScope ? `[builtin off+${agent.overrideScope}]` : "[builtin off]")
+						: (agent.overrideScope ? `[builtin+${agent.overrideScope}]` : "[builtin]"))
+					: agent.source === "project"
+						? "[proj]"
+						: "[user]";
 			const scopeBadge = theme.fg("dim", scopeLabel);
 			const descText = theme.fg("dim", agent.description);
 

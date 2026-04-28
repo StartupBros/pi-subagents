@@ -84,11 +84,11 @@ export function finalizeSingleOutput(params: {
 }): { displayOutput: string; savedPath?: string; saveError?: string } {
 	let displayOutput = params.truncatedOutput || params.fullOutput;
 	if (params.exitCode === 0 && params.savedPath) {
-		displayOutput += `\n\n📄 Output saved to: ${params.savedPath}`;
+		displayOutput += `\n\nOutput saved to: ${params.savedPath}`;
 		return { displayOutput, savedPath: params.savedPath };
 	}
 	if (params.exitCode === 0 && params.saveError && params.outputPath) {
-		displayOutput += `\n\n⚠️ Failed to save output to: ${params.outputPath}\n${params.saveError}`;
+		displayOutput += `\n\nFailed to save output to: ${params.outputPath}\n${params.saveError}`;
 		return { displayOutput, saveError: params.saveError };
 	}
 	return { displayOutput };

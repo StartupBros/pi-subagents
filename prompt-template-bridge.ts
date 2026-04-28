@@ -78,6 +78,7 @@ interface PromptTemplateBridgeResult {
 		results?: Array<{
 			agent?: string;
 			messages?: unknown[];
+			finalOutput?: string;
 			exitCode?: number;
 			error?: string;
 			model?: string;
@@ -180,12 +181,13 @@ function sanitizeRecentTools(
 	tools: Array<{ tool?: string; args?: string }> | undefined,
 ): Array<{ tool: string; args: string }> | undefined {
 	if (!tools || tools.length === 0) return undefined;
-	const sanitized = tools
-		.filter((entry) => typeof entry.tool === "string" && entry.tool.trim().length > 0)
-		.map((entry) => ({
-			tool: entry.tool as string,
+	const sanitized = tools.flatMap((entry) => {
+		if (typeof entry.tool !== "string" || entry.tool.trim().length === 0) return [];
+		return [{
+			tool: entry.tool,
 			args: typeof entry.args === "string" ? entry.args : String(entry.args ?? ""),
-		}));
+		}];
+	});
 	return sanitized.length > 0 ? sanitized : undefined;
 }
 
@@ -205,6 +207,15 @@ function resolveProgressModel(
 	}
 	const firstWithModel = results.find((result) => typeof result.model === "string");
 	return firstWithModel?.model;
+}
+
+function buildDelegationMessages(result: { messages?: unknown[]; finalOutput?: string }, fallbackText?: string): unknown[] {
+	if (Array.isArray(result.messages) && result.messages.length > 0) return result.messages;
+	const text = typeof result.finalOutput === "string" && result.finalOutput.trim().length > 0
+		? result.finalOutput.trim()
+		: fallbackText;
+	if (!text) return [];
+	return [{ role: "assistant", content: [{ type: "text", text }] }];
 }
 
 function toDelegationUpdate(requestId: string, update: PromptTemplateBridgeResult): PromptTemplateDelegationUpdate | undefined {
@@ -324,7 +335,8 @@ export function registerPromptTemplateDelegationBridge<Ctx extends { cwd?: strin
 					options.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, payload);
 				},
 			);
-			const messages = result.details?.results?.[0]?.messages ?? [];
+			const contentText = firstTextContent(result.content);
+			const messages = buildDelegationMessages(result.details?.results?.[0] ?? {}, contentText);
 			const parallelResults = request.tasks
 				? request.tasks.map<PromptTemplateDelegationParallelResult>((task, index) => {
 					const step = result.details?.results?.[index];
@@ -340,13 +352,12 @@ export function registerPromptTemplateDelegationBridge<Ctx extends { cwd?: strin
 					const errorText = step.error;
 					return {
 						agent: step.agent ?? task.agent,
-						messages: step.messages ?? [],
+						messages: buildDelegationMessages(step),
 						isError: (exitCode !== undefined && exitCode !== 0) || !!errorText,
 						errorText: errorText || undefined,
 					};
 				})
 				: undefined;
-			const contentText = firstTextContent(result.content);
 			const response: PromptTemplateDelegationResponse = {
 				...request,
 				messages,

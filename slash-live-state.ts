@@ -1,8 +1,8 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
-import type { SubagentParamsLike } from "./subagent-executor.js";
-import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.js";
-import { type Details, type SingleResult, type Usage, SLASH_RESULT_TYPE } from "./types.js";
+import type { SubagentParamsLike } from "./subagent-executor.ts";
+import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.ts";
+import { type Details, type SingleResult, type Usage, SLASH_RESULT_TYPE } from "./types.ts";
 
 export interface SlashMessageDetails {
 	requestId: string;
@@ -278,11 +278,9 @@ export function restoreSlashFinalSnapshots(entries: unknown[]): void {
 	liveSnapshots.clear();
 	finalSnapshots.clear();
 	for (const entry of entries) {
-		const e = entry as { type?: string; message?: { role?: string; customType?: string; display?: boolean; details?: unknown } };
-		if (e?.type !== "message") continue;
-		const m = e.message;
-		if (!m || m.role !== "custom" || m.customType !== SLASH_RESULT_TYPE || m.display !== false) continue;
-		const details = resolveSlashMessageDetails(m.details);
+		const e = entry as { type?: string; customType?: string; details?: unknown };
+		if (e?.type !== "custom_message" || e.customType !== SLASH_RESULT_TYPE) continue;
+		const details = resolveSlashMessageDetails(e.details);
 		if (!details) continue;
 		finalSnapshots.set(details.requestId, { result: details.result, version: nextVersion() });
 	}

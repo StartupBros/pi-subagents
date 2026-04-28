@@ -6,17 +6,22 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
-import type { AsyncStatus, DisplayItem, ErrorInfo, SingleResult } from "./types.ts";
+import { formatToolCall } from "./formatters.ts";
+import type { AgentProgress, AsyncStatus, Details, DisplayItem, ErrorInfo, SingleResult, ToolCallSummary } from "./types.ts";
 
 // ============================================================================
 // File System Utilities
 // ============================================================================
 
-// Cache for status file reads - avoid re-reading unchanged files
 const statusCache = new Map<string, { mtime: number; status: AsyncStatus }>();
 
 function getErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+export function resolveChildCwd(baseCwd: string, childCwd: string | undefined): string {
+	if (!childCwd) return baseCwd;
+	return path.isAbsolute(childCwd) ? childCwd : path.resolve(baseCwd, childCwd);
 }
 
 function isNotFoundError(error: unknown): boolean {
@@ -74,7 +79,6 @@ export function readStatus(asyncDir: string): AsyncStatus | null {
 	return status;
 }
 
-// Cache for output tail reads - avoid re-reading unchanged files
 const outputTailCache = new Map<string, { mtime: number; size: number; lines: string[] }>();
 
 /**
@@ -87,7 +91,6 @@ export function getOutputTail(outputFile: string | undefined, maxLines: number =
 		const stat = fs.statSync(outputFile);
 		if (stat.size === 0) return [];
 
-		// Check cache using both mtime and size (size changes more frequently during writes)
 		const cached = outputTailCache.get(outputFile);
 		if (cached && cached.mtime === stat.mtimeMs && cached.size === stat.size) {
 			return cached.lines;
@@ -102,9 +105,7 @@ export function getOutputTail(outputFile: string | undefined, maxLines: number =
 		const allLines = content.split("\n").filter((l) => l.trim());
 		const lines = allLines.slice(-maxLines).map((l) => l.slice(0, 120) + (l.length > 120 ? "..." : ""));
 
-		// Cache the result
 		outputTailCache.set(outputFile, { mtime: stat.mtimeMs, size: stat.size, lines });
-		// Limit cache size
 		if (outputTailCache.size > 20) {
 			const firstKey = outputTailCache.keys().next().value;
 			if (firstKey) outputTailCache.delete(firstKey);
@@ -112,12 +113,15 @@ export function getOutputTail(outputFile: string | undefined, maxLines: number =
 
 		return lines;
 	} catch {
+		// Output tails are UI-only hints; unreadable or missing files should render as no tail.
 		return [];
 	} finally {
 		if (fd !== null) {
 			try {
 				fs.closeSync(fd);
-			} catch {}
+			} catch {
+				// Closing the best-effort tail file handle should not surface over the main status view.
+			}
 		}
 	}
 }
@@ -125,16 +129,16 @@ export function getOutputTail(outputFile: string | undefined, maxLines: number =
 /**
  * Get human-readable last activity time for a file
  */
-export function getLastActivity(outputFile: string | undefined): string {
+	export function getLastActivity(outputFile: string | undefined): string {
 	if (!outputFile) return "";
 	try {
-		// Single stat call - throws if file doesn't exist
 		const stat = fs.statSync(outputFile);
 		const ago = Date.now() - stat.mtimeMs;
 		if (ago < 1000) return "active now";
 		if (ago < 60000) return `active ${Math.floor(ago / 1000)}s ago`;
 		return `active ${Math.floor(ago / 60000)}m ago`;
 	} catch {
+		// Last-activity text is best effort; missing files should simply omit the hint.
 		return "";
 	}
 }
@@ -201,13 +205,14 @@ export function getFinalOutput(messages: Message[]): string {
 }
 
 export function getSingleResultOutput(result: Pick<SingleResult, "finalOutput" | "messages">): string {
-	return result.finalOutput ?? getFinalOutput(result.messages);
+	return result.finalOutput ?? getFinalOutput(result.messages ?? []);
 }
 
 /**
  * Extract display items (text and tool calls) from messages
  */
-export function getDisplayItems(messages: Message[]): DisplayItem[] {
+export function getDisplayItems(messages: Message[] | undefined): DisplayItem[] {
+	if (!messages || messages.length === 0) return [];
 	const items: DisplayItem[] = [];
 	for (const msg of messages) {
 		if (msg.role === "assistant") {
@@ -220,19 +225,75 @@ export function getDisplayItems(messages: Message[]): DisplayItem[] {
 	return items;
 }
 
+function compactCompletedProgress(progress: AgentProgress): AgentProgress {
+	if (progress.status === "running") return progress;
+	return {
+		index: progress.index,
+		agent: progress.agent,
+		status: progress.status,
+		activityState: progress.activityState,
+		task: progress.task,
+		skills: progress.skills,
+		toolCount: progress.toolCount,
+		tokens: progress.tokens,
+		durationMs: progress.durationMs,
+		error: progress.error,
+		failedTool: progress.failedTool,
+		recentTools: [],
+		recentOutput: [],
+	};
+}
+
+export function extractToolCallSummaries(messages: Message[] | undefined): ToolCallSummary[] {
+	if (!messages?.length) return [];
+	const summaries: ToolCallSummary[] = [];
+	for (const msg of messages) {
+		if (msg.role !== "assistant") continue;
+		for (const part of msg.content) {
+			if (part.type !== "toolCall") continue;
+			const args = typeof part.arguments === "object" && part.arguments !== null && !Array.isArray(part.arguments)
+				? part.arguments
+				: {};
+			summaries.push({
+				text: formatToolCall(part.name, args),
+				expandedText: formatToolCall(part.name, args, true),
+			});
+		}
+	}
+	return summaries;
+}
+
+export function compactForegroundResult(result: SingleResult): SingleResult {
+	if (result.progress?.status === "running") return result;
+	const toolCalls = result.toolCalls?.length ? result.toolCalls : extractToolCallSummaries(result.messages);
+	return {
+		...result,
+		messages: undefined,
+		progress: undefined,
+		toolCalls: toolCalls.length ? toolCalls : undefined,
+	};
+}
+
+export function compactForegroundDetails(details: Details): Details {
+	return {
+		...details,
+		results: details.results.map(compactForegroundResult),
+		progress: details.progress
+			? details.progress.map(compactCompletedProgress)
+			: undefined,
+	};
+}
+
 /**
  * Detect errors in subagent execution from messages (only errors with no subsequent success)
  */
 export function detectSubagentError(messages: Message[]): ErrorInfo {
-	// Step 1: Find the last assistant message with text content.
-	// If the agent produced a text response after encountering errors,
-	// it had a chance to recover — only errors AFTER this point matter.
 	let lastAssistantTextIndex = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {
 			const hasText = Array.isArray(msg.content) && msg.content.some(
-				(c) => c.type === "text" && "text" in c && (c.text as string).trim().length > 0,
+				(c) => c.type === "text" && "text" in c && typeof c.text === "string" && c.text.trim().length > 0,
 			);
 			if (hasText) {
 				lastAssistantTextIndex = i;
@@ -241,28 +302,26 @@ export function detectSubagentError(messages: Message[]): ErrorInfo {
 		}
 	}
 
-	// Step 2: Only scan tool results AFTER the last assistant text message.
-	// Errors before the agent's final response are implicitly recovered.
 	const scanStart = lastAssistantTextIndex >= 0 ? lastAssistantTextIndex + 1 : 0;
 
-	// Step 3: Check tool results in the post-response window
 	for (let i = messages.length - 1; i >= scanStart; i--) {
 		const msg = messages[i];
 		if (msg.role !== "toolResult") continue;
+		const toolName = "toolName" in msg && typeof msg.toolName === "string" ? msg.toolName : undefined;
+		const isError = "isError" in msg && msg.isError === true;
 
-		if ((msg as any).isError) {
+		if (isError) {
 			const text = msg.content.find((c) => c.type === "text");
 			const details = text && "text" in text ? text.text : undefined;
 			const exitMatch = details?.match(/exit(?:ed)?\s*(?:with\s*)?(?:code|status)?\s*[:\s]?\s*(\d+)/i);
 			return {
 				hasError: true,
 				exitCode: exitMatch ? parseInt(exitMatch[1], 10) : 1,
-				errorType: (msg as any).toolName || "tool",
+				errorType: toolName || "tool",
 				details: details?.slice(0, 200),
 			};
 		}
 
-		const toolName = (msg as any).toolName;
 		if (toolName !== "bash") continue;
 
 		const text = msg.content.find((c) => c.type === "text");
@@ -304,25 +363,54 @@ export function detectSubagentError(messages: Message[]): ErrorInfo {
  * Extract a preview of tool arguments for display
  */
 export function extractToolArgsPreview(args: Record<string, unknown>): string {
+	const truncatePreview = (value: string, maxLength: number): string =>
+		value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+
+	const stringifyPreviewValue = (value: unknown): string | undefined => {
+		if (typeof value === "string" && value.trim().length > 0) return value;
+		if (typeof value === "number" || typeof value === "boolean") return String(value);
+		return undefined;
+	};
+
+	const previewArray = (value: unknown): string | undefined => {
+		if (!Array.isArray(value) || value.length === 0) return undefined;
+		const first = stringifyPreviewValue(value[0]);
+		if (!first) return undefined;
+		const suffix = value.length > 1 ? ` (+${value.length - 1} more)` : "";
+		return `${first}${suffix}`;
+	};
+
 	// Handle MCP tool calls - show server/tool info
 	if (args.tool && typeof args.tool === "string") {
 		const server = args.server && typeof args.server === "string" ? `${args.server}/` : "";
 		const toolArgs = args.args && typeof args.args === "string" ? ` ${args.args.slice(0, 40)}` : "";
 		return `${server}${args.tool}${toolArgs}`;
 	}
+
+	const queriesPreview = previewArray(args.queries);
+	if (queriesPreview) return truncatePreview(queriesPreview, 60);
+	if (typeof args.query === "string" && args.query.trim().length > 0) return truncatePreview(args.query, 60);
+	if (typeof args.workflow === "string" && args.workflow.trim().length > 0) return `workflow=${truncatePreview(args.workflow, 48)}`;
+
+	if (typeof args.url === "string" && args.url.trim().length > 0) return truncatePreview(args.url, 60);
+	const urlsPreview = previewArray(args.urls);
+	if (urlsPreview) return truncatePreview(urlsPreview, 60);
+	if (typeof args.prompt === "string" && args.prompt.trim().length > 0) return truncatePreview(args.prompt, 60);
 	
 	const previewKeys = ["command", "path", "file_path", "pattern", "query", "url", "task", "describe", "search"];
 	for (const key of previewKeys) {
 		if (args[key] && typeof args[key] === "string") {
 			const value = args[key] as string;
-			return value.length > 60 ? `${value.slice(0, 57)}...` : value;
+			return truncatePreview(value, 60);
 		}
 	}
 	
 	// Fallback: show first string value found
 	for (const [key, value] of Object.entries(args)) {
+		const arrayPreview = previewArray(value);
+		if (arrayPreview) return `${key}=${truncatePreview(arrayPreview, 50)}`;
 		if (typeof value === "string" && value.length > 0) {
-			const preview = value.length > 50 ? `${value.slice(0, 47)}...` : value;
+			const preview = truncatePreview(value, 50);
 			return `${key}=${preview}`;
 		}
 	}
@@ -363,4 +451,4 @@ export function extractTextFromContent(content: unknown): string {
 // Concurrency Utilities
 // ============================================================================
 
-export { mapConcurrent } from "./parallel-utils.js";
+export { mapConcurrent } from "./parallel-utils.ts";

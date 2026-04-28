@@ -10,22 +10,29 @@
 
 import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { MockPi } from "../support/helpers.ts";
 import {
+	createEventBus,
 	createMockPi,
 	createTempDir,
-	removeTempDir,
+	makeAgent,
 	makeAgentConfigs,
+	makeMinimalCtx,
+	removeTempDir,
 	tryImport,
 } from "../support/helpers.ts";
 
 // Top-level await: try importing pi-dependent modules
 const utils = await tryImport<any>("./utils.ts");
 const execution = await tryImport<any>("./execution.ts");
+const executorMod = await tryImport<any>("./subagent-executor.ts");
 const piAvailable = !!(execution && utils);
 
 const runSync = execution?.runSync;
 const mapConcurrent = utils?.mapConcurrent;
+const createSubagentExecutor = executorMod?.createSubagentExecutor;
 
 // ---------------------------------------------------------------------------
 // mapConcurrent — always runs (pure logic, no pi deps beyond utils.ts)
@@ -105,6 +112,25 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		removeTempDir(tempDir);
 	});
 
+	function makeExecutor(agents = [makeAgent("echo")]) {
+		return createSubagentExecutor({
+			pi: { events: createEventBus(), getSessionName: () => undefined },
+			state: { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+			config: {},
+			asyncByDefault: false,
+			tempArtifactsDir: tempDir,
+			getSubagentSessionRoot: () => tempDir,
+			expandTilde: (value: string) => value,
+			discoverAgents: () => ({ agents }),
+		});
+	}
+
+	function readLastCallArgs(): string[] {
+		const callFile = fs.readdirSync(mockPi.dir).find((name) => name.startsWith("call-"));
+		assert.ok(callFile, "expected a recorded mock pi call");
+		return JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
+	}
+
 	it("runs multiple agents concurrently via mapConcurrent + runSync", async () => {
 		mockPi.onCall({ output: "Done" });
 		const agents = makeAgentConfigs(["agent-a", "agent-b", "agent-c"]);
@@ -145,38 +171,77 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(ok, 2);
 	});
 
-	it("tracks per-task fallback independently", async () => {
-		mockPi.onCall({ exitCode: 1, stderr: "429 rate limit exceeded" });
-		mockPi.onCall({ output: "Recovered task A" });
-		mockPi.onCall({ output: "Task B direct success" });
-		const agents = [
-			{ ...makeAgentConfigs(["a"])[0], model: "openai/gpt-4.1" },
-			{ ...makeAgentConfigs(["b"])[0], model: "anthropic/claude-sonnet-4-5" },
-		];
+	it("top-level parallel output saves use per-task output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Saved report" });
+		const executor = makeExecutor();
 
-		const results = await mapConcurrent(
-			[
-				{ agent: "a", task: "Task A", runtimeModelContext: {
-					availableModels: [
-						{ provider: "openai", id: "gpt-4.1", fullId: "openai/gpt-4.1" },
-						{ provider: "google", id: "gemini-2.5-pro", fullId: "google/gemini-2.5-pro" },
-					],
-					config: { fallbackModels: ["google/gemini-2.5-pro"], cooldownMinutes: 5 },
-				} },
-				{ agent: "b", task: "Task B", runtimeModelContext: {
-					availableModels: [{ provider: "anthropic", id: "claude-sonnet-4-5", fullId: "anthropic/claude-sonnet-4-5" }],
-					config: { cooldownMinutes: 5 },
-				} },
-			],
-			1,
-			async ({ agent, task, runtimeModelContext }: any, i: number) =>
-				runSync(tempDir, agents as any, agent, task, { index: i, runtimeModelContext }),
+		const result = await executor.execute(
+			"parallel-output",
+			{ tasks: [{ agent: "echo", task: "Write report", output: "parallel-output.md" }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
 		);
 
-		assert.equal(results.length, 2);
-		assert.equal(results[0].modelAttempts?.length, 2);
-		assert.equal(results[1].modelAttempts?.length, 1);
-		assert.equal(results[0].exitCode, 0);
-		assert.equal(results[1].exitCode, 0);
+		const outputPath = path.join(tempDir, "parallel-output.md");
+		assert.equal(result.isError, undefined);
+		assert.equal(fs.readFileSync(outputPath, "utf-8"), "Saved report");
+		assert.equal(result.details?.results?.[0]?.savedOutputPath, outputPath);
+	});
+
+	it("rejects duplicate top-level parallel output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"parallel-duplicate-output",
+			{
+				tasks: [
+					{ agent: "echo", task: "Write A", output: "same.md" },
+					{ agent: "echo", task: "Write B", output: "same.md" },
+				],
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /same path/);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
+	it("top-level parallel reads are injected once with chain-style prefix", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Read done" });
+		const executor = makeExecutor();
+
+		await executor.execute(
+			"parallel-reads",
+			{ tasks: [{ agent: "echo", task: "Inspect", reads: ["a.md", "b.md"] }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const args = readLastCallArgs();
+		assert.equal(args.at(-1), `Task: [Read from: ${path.join(tempDir, "a.md")}, ${path.join(tempDir, "b.md")}]
+
+Inspect`);
+	});
+
+	it("top-level parallel progress emits the existing progress instruction style", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Progress done" });
+		const executor = makeExecutor();
+
+		await executor.execute(
+			"parallel-progress",
+			{ tasks: [{ agent: "echo", task: "Track work", progress: true }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const args = readLastCallArgs();
+		assert.ok((args.at(-1) ?? "").includes(`Update progress at: ${path.join(tempDir, "progress.md")}`));
+		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), true);
 	});
 });

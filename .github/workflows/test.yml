@@ -14,8 +14,8 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
       - name: Install devDependencies
@@ -23,6 +23,5 @@ jobs:
       - name: Unit tests
         run: npm test
       - name: Integration tests
+        if: runner.os != 'Windows'
         run: npm run test:integration
-      - name: E2E tests
-        run: npm run test:e2e

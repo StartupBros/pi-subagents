@@ -9,6 +9,11 @@ export interface MockPiResponse {
 	exitCode?: number;
 	delay?: number;
 	jsonl?: unknown[];
+	steps?: Array<{
+		delay?: number;
+		jsonl?: unknown[];
+		stderr?: string;
+	}>;
 	echoEnv?: string[];
 }
 

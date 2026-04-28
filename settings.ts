@@ -3,13 +3,12 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "./agents.ts";
 import { normalizeSkillInput } from "./skills.ts";
-
-const CHAIN_RUNS_DIR = path.join(os.tmpdir(), "pi-chain-runs");
+import { CHAIN_RUNS_DIR } from "./types.ts";
 const CHAIN_DIR_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+const INITIAL_PROGRESS_CONTENT = "# Progress\n\n## Status\nIn Progress\n\n## Tasks\n\n## Files Changed\n\n## Notes\n";
 
 // =============================================================================
 // Behavior Resolution Types
@@ -100,7 +99,9 @@ export function createChainDir(runId: string, baseDir?: string): string {
 export function removeChainDir(chainDir: string): void {
 	try {
 		fs.rmSync(chainDir, { recursive: true });
-	} catch {}
+	} catch {
+		// Chain cleanup is best-effort. Runs can already have cleaned their temp dir.
+	}
 }
 
 export function cleanupOldChainDirs(): void {
@@ -110,6 +111,8 @@ export function cleanupOldChainDirs(): void {
 	try {
 		dirs = fs.readdirSync(CHAIN_RUNS_DIR);
 	} catch {
+		// Startup cleanup is best-effort. If the scoped temp root is unreadable,
+		// skip cleanup instead of failing extension startup.
 		return;
 	}
 
@@ -222,6 +225,10 @@ function resolveChainPath(filePath: string, chainDir: string): string {
  * Build chain instructions from resolved behavior.
  * These are appended to the task to tell the agent what to read/write.
  */
+export function writeInitialProgressFile(progressDir: string): void {
+	fs.writeFileSync(path.join(progressDir, "progress.md"), INITIAL_PROGRESS_CONTENT);
+}
+
 export function buildChainInstructions(
 	behavior: ResolvedStepBehavior,
 	chainDir: string,
@@ -354,5 +361,5 @@ export function createParallelDirs(
 	}
 }
 
-export type { ParallelTaskResult } from "./parallel-utils.js";
-export { aggregateParallelOutputs } from "./parallel-utils.js";
+export type { ParallelTaskResult } from "./parallel-utils.ts";
+export { aggregateParallelOutputs } from "./parallel-utils.ts";

@@ -1,9 +1,10 @@
 /**
- * Subagent completion notifications (extension)
+ * Subagent completion notifications.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { buildCompletionKey, getGlobalSeenMap, markSeenWithTtl } from "./completion-dedupe.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "./types.ts";
 
 interface ChainStepResult {
 	agent: string;
@@ -11,13 +12,25 @@ interface ChainStepResult {
 	success: boolean;
 }
 
+export interface SubagentNotifyDetails {
+	agent: string;
+	status: "completed" | "failed" | "paused";
+	taskInfo?: string;
+	resultPreview: string;
+	durationMs?: number;
+	sessionLabel?: string;
+	sessionValue?: string;
+}
+
 interface SubagentResult {
 	id: string | null;
 	agent: string | null;
 	success: boolean;
 	summary: string;
-	exitCode: number;
+	exitCode?: number;
+	state?: string;
 	timestamp: number;
+	durationMs?: number;
 	sessionFile?: string;
 	shareUrl?: string;
 	gistUrl?: string;
@@ -28,6 +41,17 @@ interface SubagentResult {
 }
 
 export default function registerSubagentNotify(pi: ExtensionAPI): void {
+	const unsubscribeStoreKey = "__pi_subagents_notify_unsubscribe__";
+	const globalStore = globalThis as Record<string, unknown>;
+	const previousUnsubscribe = globalStore[unsubscribeStoreKey];
+	if (typeof previousUnsubscribe === "function") {
+		try {
+			previousUnsubscribe();
+		} catch {
+			// Best effort cleanup for stale handlers from an older reload.
+		}
+	}
+
 	const seen = getGlobalSeenMap("__pi_subagents_notify_seen__");
 	const ttlMs = 10 * 60 * 1000;
 
@@ -38,28 +62,34 @@ export default function registerSubagentNotify(pi: ExtensionAPI): void {
 		if (markSeenWithTtl(seen, key, now, ttlMs)) return;
 
 		const agent = result.agent ?? "unknown";
-		const status = result.success ? "completed" : "failed";
+		const summary = typeof result.summary === "string" ? result.summary : "";
+		const paused = !result.success && (
+			result.exitCode === 0
+			|| result.state === "paused"
+			|| summary.startsWith("Paused after interrupt.")
+		);
+		const status = paused ? "paused" : result.success ? "completed" : "failed";
 
 		const taskInfo =
 			result.taskIndex !== undefined && result.totalTasks !== undefined
 				? ` (${result.taskIndex + 1}/${result.totalTasks})`
 				: "";
 
-		const extra: string[] = [];
-		if (result.shareUrl) {
-			extra.push(`Session: ${result.shareUrl}`);
-		} else if (result.shareError) {
-			extra.push(`Session share error: ${result.shareError}`);
-		} else if (result.sessionFile) {
-			extra.push(`Session file: ${result.sessionFile}`);
-		}
+		const sessionLine = result.shareUrl
+			? `Session: ${result.shareUrl}`
+			: result.shareError
+				? `Session share error: ${result.shareError}`
+				: result.sessionFile
+					? `Session file: ${result.sessionFile}`
+					: undefined;
 
+		const displaySummary = summary.trim() ? summary : "(no output)";
 		const content = [
 			`Background task ${status}: **${agent}**${taskInfo}`,
 			"",
-			result.summary,
-			extra.length ? "" : undefined,
-			extra.length ? extra.join("\n") : undefined,
+			displaySummary,
+			sessionLine ? "" : undefined,
+			sessionLine,
 		]
 			.filter((line) => line !== undefined)
 			.join("\n");
@@ -74,5 +104,5 @@ export default function registerSubagentNotify(pi: ExtensionAPI): void {
 		);
 	};
 
-	pi.events.on("subagent:complete", handleComplete);
+	globalStore[unsubscribeStoreKey] = pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete);
 }

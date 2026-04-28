@@ -1,7 +1,7 @@
 /**
  * Integration tests for single (sync) agent execution.
  *
- * Uses createMockPi() from @marcfargas/pi-test-harness to simulate the pi CLI.
+ * Uses the local createMockPi() helper to simulate the pi CLI.
  * Tests the full spawn→parse→result pipeline in runSync without a real LLM.
  *
  * These tests require pi packages to be importable (they run inside a pi
@@ -17,20 +17,93 @@ import type { MockPi } from "../support/helpers.ts";
 import {
 	createMockPi,
 	createTempDir,
+	createEventBus,
 	removeTempDir,
 	makeAgentConfigs,
 	makeAgent,
 	events,
 	tryImport,
 } from "../support/helpers.ts";
+import { INTERCOM_DETACH_REQUEST_EVENT, INTERCOM_DETACH_RESPONSE_EVENT } from "../../types.ts";
 
-// Top-level await: try importing pi-dependent modules
-const execution = await tryImport<any>("./execution.ts");
-const utils = await tryImport<any>("./utils.ts");
+interface ModelAttempt {
+	success?: boolean;
+}
+
+interface ProgressSummary {
+	agent: string;
+	index: number;
+	status: string;
+	activityState?: string;
+	lastActivityAt?: number;
+	currentTool?: string;
+	currentToolArgs?: string;
+	currentToolStartedAt?: number;
+	durationMs: number;
+	toolCount: number;
+}
+
+interface ArtifactPaths {
+	outputPath: string;
+}
+
+interface RunSyncResult {
+	exitCode: number;
+	agent: string;
+	messages: unknown[];
+	error?: string;
+	model?: string;
+	skills?: string[];
+	skillsWarning?: string;
+	attemptedModels?: string[];
+	modelAttempts?: ModelAttempt[];
+	usage: { turns: number; input: number; output: number };
+	progress: ProgressSummary;
+	artifactPaths?: ArtifactPaths;
+	finalOutput?: string;
+	interrupted?: boolean;
+	detached?: boolean;
+	detachedReason?: string;
+	savedOutputPath?: string;
+	outputSaveError?: string;
+	sessionFile?: string;
+}
+
+interface ExecutionModule {
+	runSync(
+		runtimeCwd: string,
+		agents: ReturnType<typeof makeAgentConfigs>,
+		agentName: string,
+		task: string,
+		options: Record<string, unknown>,
+	): Promise<RunSyncResult>;
+}
+
+interface UtilsModule {
+	getFinalOutput(messages: unknown[]): string;
+}
+
+const execution = await tryImport<ExecutionModule>("./execution.ts");
+const utils = await tryImport<UtilsModule>("./utils.ts");
 const available = !!(execution && utils);
 
 const runSync = execution?.runSync;
 const getFinalOutput = utils?.getFinalOutput;
+
+function writePackageSkill(packageRoot: string, skillName: string): void {
+	const skillDir = path.join(packageRoot, "skills", skillName);
+	fs.mkdirSync(skillDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(packageRoot, "package.json"),
+		JSON.stringify({ name: `${skillName}-pkg`, version: "1.0.0", pi: { skills: [`./skills/${skillName}`] } }, null, 2),
+		"utf-8",
+	);
+	fs.writeFileSync(
+		path.join(skillDir, "SKILL.md"),
+		`---\nname: ${skillName}\ndescription: test skill\n---\nbody\n`,
+		"utf-8",
+	);
+}
 
 describe("single sync execution", { skip: !available ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
@@ -54,14 +127,27 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		removeTempDir(tempDir);
 	});
 
+	function readCallArgs(): string[] {
+		const callFile = fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.sort()
+			.at(-1);
+		assert.ok(callFile, "expected a recorded mock pi call");
+		const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as { args?: string[] };
+		assert.ok(Array.isArray(payload.args), "expected recorded args");
+		return payload.args;
+	}
+
 	it("spawns agent and captures output", async () => {
 		mockPi.onCall({ output: "Hello from mock agent" });
 		const agents = makeAgentConfigs(["echo"]);
 
-		const result = await runSync(tempDir, agents, "echo", "Say hello", {});
+		const sessionFile = path.join(tempDir, "child-session.jsonl");
+		const result = await runSync(tempDir, agents, "echo", "Say hello", { sessionFile });
 
 		assert.equal(result.exitCode, 0);
 		assert.equal(result.agent, "echo");
+		assert.equal(result.sessionFile, sessionFile);
 		assert.ok(result.messages.length > 0, "should have messages");
 
 		const output = getFinalOutput(result.messages);
@@ -123,50 +209,21 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.model, "openai/gpt-4o");
 	});
 
-	it("falls back to the next candidate after a retryable runtime failure", async () => {
-		mockPi.onCall({ exitCode: 1, stderr: "429 rate limit exceeded" });
-		mockPi.onCall({ output: "Recovered on second model" });
-		const agents = [makeAgent("echo", { model: "anthropic/claude-sonnet-4-5" })];
+	it("prefers the parent session provider for ambiguous bare model ids", async () => {
+		mockPi.onCall({ output: "Done" });
+		const agents = [makeAgent("echo", { model: "gpt-5-mini" })];
 
 		const result = await runSync(tempDir, agents, "echo", "Task", {
-			modelOverride: "openai/gpt-4.1",
-			runtimeModelContext: {
-				availableModels: [
-					{ provider: "openai", id: "gpt-4.1", fullId: "openai/gpt-4.1" },
-					{ provider: "anthropic", id: "claude-sonnet-4-5", fullId: "anthropic/claude-sonnet-4-5" },
-				],
-				config: { fallbackModels: ["google/gemini-2.5-pro"], cooldownMinutes: 5 },
-			},
+			availableModels: [
+				{ provider: "openai", id: "gpt-5-mini", fullId: "openai/gpt-5-mini" },
+				{ provider: "github-copilot", id: "gpt-5-mini", fullId: "github-copilot/gpt-5-mini" },
+			],
+			preferredModelProvider: "github-copilot",
 		});
 
 		assert.equal(result.exitCode, 0);
-		assert.equal(mockPi.callCount(), 2);
-		assert.equal(result.requestedModel, "openai/gpt-4.1");
-		assert.equal(result.finalModel, "anthropic/claude-sonnet-4-5");
-		assert.equal(result.modelAttempts?.length, 2);
-		assert.equal(result.modelAttempts?.[0]?.classification, "retryable-runtime");
-		assert.equal(result.modelAttempts?.[1]?.outcome, "success");
-	});
-
-	it("stops on deterministic failures without trying fallback candidates", async () => {
-		mockPi.onCall({ exitCode: 1, stderr: "bash failed (exit 1): No such file or directory" });
-		const agents = [makeAgent("echo", { model: "anthropic/claude-sonnet-4-5" })];
-
-		const result = await runSync(tempDir, agents, "echo", "Task", {
-			modelOverride: "openai/gpt-4.1",
-			runtimeModelContext: {
-				availableModels: [
-					{ provider: "openai", id: "gpt-4.1", fullId: "openai/gpt-4.1" },
-					{ provider: "anthropic", id: "claude-sonnet-4-5", fullId: "anthropic/claude-sonnet-4-5" },
-				],
-				config: { fallbackModels: ["google/gemini-2.5-pro"], cooldownMinutes: 5 },
-			},
-		});
-
-		assert.equal(result.exitCode, 1);
-		assert.equal(mockPi.callCount(), 1);
-		assert.equal(result.modelAttempts?.length, 1);
-		assert.equal(result.modelAttempts?.[0]?.classification, "deterministic");
+		assert.equal(result.model, "github-copilot/gpt-5-mini");
+		assert.deepEqual(result.attemptedModels, ["github-copilot/gpt-5-mini"]);
 	});
 
 	it("tracks usage from message events", async () => {
@@ -180,6 +237,59 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.usage.output, 50); // from mock
 	});
 
+	it("retries with fallback models on retryable provider failures", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "temporary provider failure" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "rate limit exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered on fallback" });
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "fallback-sync",
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.model, "anthropic/claude-sonnet-4");
+		assert.deepEqual(result.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.equal(result.modelAttempts?.length, 2);
+		assert.equal(result.modelAttempts?.[0]?.success, false);
+		assert.equal(result.modelAttempts?.[1]?.success, true);
+		assert.equal(result.usage.turns, 2);
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("does not retry on ordinary task/tool failures", async () => {
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "process exited with code 127")],
+			exitCode: 0,
+		});
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "no-fallback-task-failure",
+		});
+
+		assert.equal(result.exitCode, 127);
+		assert.equal(result.modelAttempts?.length, 1);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
 	it("tracks progress during execution", async () => {
 		mockPi.onCall({ output: "Done" });
 		const agents = makeAgentConfigs(["echo"]);
@@ -191,6 +301,40 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.progress.index, 3);
 		assert.equal(result.progress.status, "completed");
 		assert.ok(result.progress.durationMs > 0, "should track duration");
+	});
+
+	it("tracks live activity updates and exposes artifact paths while running", async () => {
+		const updates: Array<{ details?: { results?: Array<{ artifactPaths?: ArtifactPaths }>; progress?: ProgressSummary[] } }> = [];
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("read", { path: "package.json" })], delay: 20 },
+				{ jsonl: [events.toolEnd("read"), events.toolResult("read", "{\"name\":\"pkg\"}")], delay: 20 },
+				{ jsonl: [events.assistantMessage("Done")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+		const artifactsDir = path.join(tempDir, "artifacts");
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "live-progress",
+			artifactsDir,
+			artifactConfig: { enabled: true, includeInput: true, includeOutput: true, includeMetadata: true },
+			onUpdate: (update: { details?: { results?: Array<{ artifactPaths?: ArtifactPaths }>; progress?: ProgressSummary[] } }) => {
+				updates.push(update);
+			},
+		});
+
+		assert.ok(updates.length > 0, "expected at least one live progress update");
+		assert.equal(
+			updates.some((update) => update.details?.results?.[0]?.artifactPaths?.outputPath.endsWith("_output.md") === true),
+			true,
+		);
+		const runningToolUpdate = updates.find((update) => update.details?.progress?.[0]?.currentTool === "read");
+		assert.ok(runningToolUpdate, "expected a live progress update for the running tool");
+		assert.equal(runningToolUpdate?.details?.progress?.[0]?.currentTool, "read");
+		assert.equal(typeof runningToolUpdate?.details?.progress?.[0]?.currentToolStartedAt, "number");
+		assert.equal(typeof result.progress.lastActivityAt, "number");
+		assert.equal(result.progress.currentToolStartedAt, undefined);
 	});
 
 	it("sets progress.status to failed on non-zero exit", async () => {
@@ -219,6 +363,37 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const output = getFinalOutput(result.messages);
 		assert.ok(output.includes("file1.txt"), "should capture assistant text");
 		assert.equal(result.progress.toolCount, 1, "should count tool calls");
+	});
+
+	it("resolves skills from the effective task cwd", async () => {
+		const taskCwd = createTempDir("pi-subagent-task-cwd-");
+		try {
+			writePackageSkill(taskCwd, "task-cwd-skill");
+			mockPi.onCall({ output: "Done" });
+			const agents = [makeAgent("echo", { skills: ["task-cwd-skill"] })];
+
+			const result = await runSync(tempDir, agents, "echo", "Task", { cwd: taskCwd });
+
+			assert.equal(result.exitCode, 0);
+			assert.deepEqual(result.skills, ["task-cwd-skill"]);
+			assert.equal(result.skillsWarning, undefined);
+		} finally {
+			removeTempDir(taskCwd);
+		}
+	});
+
+	it("falls back to the runtime cwd when the task cwd lacks a skill", async () => {
+		const taskCwd = path.join(tempDir, "nested");
+		fs.mkdirSync(taskCwd, { recursive: true });
+		writePackageSkill(tempDir, "runtime-fallback-skill");
+		mockPi.onCall({ output: "Done" });
+		const agents = [makeAgent("echo", { skills: ["runtime-fallback-skill"] })];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", { cwd: taskCwd });
+
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(result.skills, ["runtime-fallback-skill"]);
+		assert.equal(result.skillsWarning, undefined);
 	});
 
 	it("writes artifacts when configured", async () => {
@@ -294,6 +469,44 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		});
 	});
 
+	it("passes prompt inheritance env flags through to child execution", async () => {
+		mockPi.onCall({ echoEnv: ["PI_SUBAGENT_INHERIT_PROJECT_CONTEXT", "PI_SUBAGENT_INHERIT_SKILLS"] });
+		const agents = [makeAgent("echo", {
+			systemPromptMode: "replace",
+			inheritProjectContext: false,
+			inheritSkills: false,
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "prompt-inheritance-env",
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(JSON.parse(result.finalOutput ?? "{}"), {
+			PI_SUBAGENT_INHERIT_PROJECT_CONTEXT: "0",
+			PI_SUBAGENT_INHERIT_SKILLS: "0",
+		});
+	});
+
+	it("passes custom tool extensions through even when explicit extensions are allowlisted", async () => {
+		mockPi.onCall({ output: "Done" });
+		const agents = [makeAgent("echo", {
+			tools: ["read", "./custom-tool.ts"],
+			extensions: ["./allowed-ext.ts"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "tool-extension-allowlist",
+		});
+
+		assert.equal(result.exitCode, 0);
+		const args = readCallArgs();
+		const extensionArgs = args.filter((arg, index) => args[index - 1] === "--extension");
+		assert.ok(extensionArgs.some((arg) => arg.endsWith("subagent-prompt-runtime.ts")));
+		assert.ok(extensionArgs.includes("./custom-tool.ts"));
+		assert.ok(extensionArgs.includes("./allowed-ext.ts"));
+	});
+
 	it("handles abort signal (completes faster than delay)", async () => {
 		mockPi.onCall({ delay: 10000 }); // Long delay — process should be killed before this
 		const agents = makeAgentConfigs(["slow"]);
@@ -313,6 +526,127 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		// Exit code is platform-dependent (Windows: often 1 or 0, Linux: null/143)
 	});
 
+	it("soft-interrupts the current turn and returns a paused result", async () => {
+		mockPi.onCall({ delay: 10000 });
+		const agents = makeAgentConfigs(["slow"]);
+		const controller = new AbortController();
+		const controlEvents: Array<{ type?: string; to?: string }> = [];
+
+		const start = Date.now();
+		setTimeout(() => controller.abort(), 200);
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			runId: "interrupt-run",
+			interruptSignal: controller.signal,
+			onControlEvent: (event: { type?: string; to?: string }) => {
+				controlEvents.push(event);
+			},
+		});
+		const elapsed = Date.now() - start;
+
+		assert.ok(elapsed < 5000, `should interrupt early, took ${elapsed}ms`);
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.interrupted, true);
+		assert.equal(result.progress.activityState, undefined);
+		assert.deepEqual(controlEvents, []);
+		assert.match(result.finalOutput ?? "", /Interrupted/);
+	});
+
+	it("detaches cleanly on intercom handoff without aborting the child process", async () => {
+		const eventBus = createEventBus();
+		let accepted = false;
+		eventBus.on(INTERCOM_DETACH_RESPONSE_EVENT, (payload) => {
+			if (!payload || typeof payload !== "object") return;
+			accepted = (payload as { accepted?: unknown }).accepted === true;
+		});
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("intercom", { action: "ask", to: "orchestrator" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("received pong")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+
+		// Emit the detach request the moment we observe the intercom tool start
+		// in a progress update — this is the signal the parent has set
+		// `intercomStarted=true`. Using a fixed delay here races the mock's
+		// cold spawn and flakes under load.
+		let detachEmitted = false;
+		const runPromise = runSync(tempDir, agents, "echo", "Task", {
+			runId: "intercom-detach",
+			allowIntercomDetach: true,
+			intercomEvents: eventBus,
+			onUpdate: (update) => {
+				if (detachEmitted) return;
+				const progress = (update as { details?: { progress?: Array<{ currentTool?: string }> } }).details?.progress;
+				const sawIntercom = Array.isArray(progress) && progress.some((p) => p?.currentTool === "intercom");
+				if (!sawIntercom) return;
+				detachEmitted = true;
+				eventBus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "test-request" });
+			},
+		});
+
+		const result = await runPromise;
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.detached, true);
+		assert.equal(result.detachedReason, "intercom coordination");
+		assert.equal(result.finalOutput, "Detached for intercom coordination.");
+		assert.equal(result.progress?.status, "detached");
+		assert.equal(accepted, true);
+	});
+
+	it("lets an active intercom child accept detach when another child is listening", async () => {
+		const eventBus = createEventBus();
+		let firstDetachResponse: boolean | undefined;
+		eventBus.on(INTERCOM_DETACH_RESPONSE_EVENT, (payload) => {
+			if (!payload || typeof payload !== "object") return;
+			if ((payload as { requestId?: unknown }).requestId !== "parallel-request") return;
+			firstDetachResponse ??= (payload as { accepted?: unknown }).accepted === true;
+		});
+		mockPi.onCall({ delay: 500, output: "quiet child done" });
+		const agents = makeAgentConfigs(["quiet", "intercom"]);
+
+		const quietRun = runSync(tempDir, agents, "quiet", "Quiet task", {
+			runId: "quiet-listener",
+			allowIntercomDetach: true,
+			intercomEvents: eventBus,
+		});
+		for (let attempt = 0; attempt < 50 && mockPi.callCount() < 1; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(mockPi.callCount(), 1);
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("intercom", { action: "send", to: "orchestrator" })] },
+				{ delay: 500, jsonl: [events.assistantMessage("after intercom")] },
+			],
+		});
+
+		let detachEmitted = false;
+		const intercomRun = runSync(tempDir, agents, "intercom", "Intercom task", {
+			runId: "active-intercom",
+			allowIntercomDetach: true,
+			intercomEvents: eventBus,
+			onUpdate: (update) => {
+				if (detachEmitted) return;
+				const progress = (update as { details?: { progress?: Array<{ currentTool?: string }> } }).details?.progress;
+				const sawIntercom = Array.isArray(progress) && progress.some((p) => p?.currentTool === "intercom");
+				if (!sawIntercom) return;
+				detachEmitted = true;
+				eventBus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "parallel-request" });
+			},
+		});
+
+		const [quietResult, intercomResult] = await Promise.all([quietRun, intercomRun]);
+
+		assert.equal(quietResult.exitCode, 0);
+		assert.equal(quietResult.detached, undefined);
+		assert.equal(intercomResult.exitCode, 0);
+		assert.equal(intercomResult.detached, true);
+		assert.equal(firstDetachResponse, true);
+	});
+
 	it("handles stderr without exit code as info (not error)", async () => {
 		mockPi.onCall({ output: "Success", stderr: "Warning: something", exitCode: 0 });
 		const agents = makeAgentConfigs(["echo"]);
@@ -321,4 +655,5 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 
 		assert.equal(result.exitCode, 0);
 	});
+
 });

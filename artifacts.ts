@@ -1,9 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ArtifactPaths } from "./types.ts";
-
-const TEMP_ARTIFACTS_DIR = path.join(os.tmpdir(), "pi-subagent-artifacts");
+import { TEMP_ARTIFACTS_DIR, type ArtifactPaths } from "./types.ts";
 const CLEANUP_MARKER_FILE = ".last-cleanup";
 
 export function getArtifactsDir(sessionFile: string | null): string {
@@ -64,7 +62,10 @@ export function cleanupOldArtifacts(dir: string, maxAgeDays: number): void {
 			if (stat.mtimeMs < cutoff) {
 				fs.unlinkSync(filePath);
 			}
-		} catch {}
+		} catch {
+			// Artifact cleanup is best-effort housekeeping. Skip files that disappear
+			// or become unreadable while scanning so one bad entry does not block the rest.
+		}
 	}
 
 	fs.writeFileSync(markerPath, String(now));
@@ -80,6 +81,8 @@ export function cleanupAllArtifactDirs(maxAgeDays: number): void {
 	try {
 		dirs = fs.readdirSync(sessionsBase);
 	} catch {
+		// Session artifact cleanup is best-effort. If the sessions root cannot be read,
+		// skip cleanup instead of failing extension startup.
 		return;
 	}
 
@@ -87,6 +90,9 @@ export function cleanupAllArtifactDirs(maxAgeDays: number): void {
 		const artifactsDir = path.join(sessionsBase, dir, "subagent-artifacts");
 		try {
 			cleanupOldArtifacts(artifactsDir, maxAgeDays);
-		} catch {}
+		} catch {
+			// Session cleanup is best-effort. Keep going so one unreadable session dir
+			// does not block cleanup for the rest.
+		}
 	}
 }

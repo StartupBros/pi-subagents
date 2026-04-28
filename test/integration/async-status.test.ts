@@ -79,6 +79,59 @@ describe("async status helpers", () => {
 		}
 	});
 
+	it("uses persisted running attention state from detached runners", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-running-state-"));
+		try {
+			const lastActivityAt = Date.now() - 65_000;
+			createAsyncDir(root, "run-running", {
+				runId: "run-running",
+				mode: "single",
+				state: "running",
+				activityState: "needs_attention",
+				lastActivityAt,
+				startedAt: Date.now() - 70_000,
+				lastUpdate: Date.now(),
+				steps: [{ agent: "worker", status: "running", activityState: "needs_attention", lastActivityAt }],
+			});
+
+			const runs = listAsyncRuns(root, { states: ["running"] });
+			assert.equal(runs[0]?.activityState, "needs_attention");
+			assert.equal(runs[0]?.steps[0]?.activityState, "needs_attention");
+			const text = formatAsyncRunList(runs, "Active async runs");
+			assert.match(text, /no activity for/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("formats paused runs as lifecycle state without activity state", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-paused-status-"));
+		try {
+			createAsyncDir(root, "run-paused", {
+				runId: "run-paused",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				endedAt: 200,
+				steps: [{ agent: "worker", status: "complete" }],
+			});
+
+			const overlay = listAsyncRunsForOverlay(root, 5);
+			assert.equal(overlay.active.length, 0);
+			assert.equal(overlay.recent[0]?.id, "run-paused");
+			assert.equal(overlay.recent[0]?.activityState, undefined);
+			assert.equal(overlay.recent[0]?.steps[0]?.activityState, undefined);
+
+			const text = formatAsyncRunList(overlay.recent, "Recent async runs");
+			assert.match(text, /run-paused \| paused/);
+			assert.match(text, /worker \| complete/);
+			assert.doesNotMatch(text, /paused\/paused/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("surfaces malformed status files instead of silently skipping them", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-bad-status-"));
 		const dir = path.join(root, "broken-run");
