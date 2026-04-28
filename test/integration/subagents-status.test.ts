@@ -65,8 +65,8 @@ describe("SubagentsStatusComponent", () => {
 			const output = component.render(120).join("\n");
 			assert.match(output, /Recent/);
 			assert.match(output, /Selected: run-a/);
-			assert.match(output, /output: \/tmp\/run-a\/output-0\.log/);
-			assert.match(output, /session: \/tmp\/run-a\/session\.jsonl/);
+			assert.match(output, /output: [\\/]tmp[\\/]run-a[\\/]output-0\.log/);
+			assert.match(output, /session: [\\/]tmp[\\/]run-a[\\/]session\.jsonl/);
 			assert.match(output, /0 active \/ 1 recent/);
 			assert.match(output, /summary view/);
 			assert.ok(renderRequests >= 1, "expected auto-refresh to request a render");

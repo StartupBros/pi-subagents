@@ -29,17 +29,25 @@ function writeConfig(homeDir: string, config: Record<string, unknown>) {
 	fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify(config, null, 2));
 }
 
+function setHomeDir(homeDir: string) {
+	process.env.HOME = homeDir;
+	process.env.USERPROFILE = homeDir;
+}
+
 describe("managerCommand config", () => {
 	const originalHome = process.env.HOME;
+	const originalUserProfile = process.env.USERPROFILE;
 
 	afterEach(() => {
 		if (originalHome === undefined) delete process.env.HOME;
 		else process.env.HOME = originalHome;
+		if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = originalUserProfile;
 	});
 
 	it("defaults to /agents", () => {
 		const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-home-"));
-		process.env.HOME = homeDir;
+		setHomeDir(homeDir);
 
 		const pi = makeFakePi();
 		registerSubagentExtension(pi as never);
@@ -50,7 +58,7 @@ describe("managerCommand config", () => {
 
 	it("registers a custom manager command", () => {
 		const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-home-"));
-		process.env.HOME = homeDir;
+		setHomeDir(homeDir);
 		writeConfig(homeDir, { managerCommand: "subagents" });
 
 		const pi = makeFakePi();
@@ -62,7 +70,7 @@ describe("managerCommand config", () => {
 
 	it("normalizes a leading slash in managerCommand", () => {
 		const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-home-"));
-		process.env.HOME = homeDir;
+		setHomeDir(homeDir);
 		writeConfig(homeDir, { managerCommand: "/subagents" });
 
 		const pi = makeFakePi();
@@ -73,7 +81,7 @@ describe("managerCommand config", () => {
 
 	it("disables manager command registration when set to false", () => {
 		const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-home-"));
-		process.env.HOME = homeDir;
+		setHomeDir(homeDir);
 		writeConfig(homeDir, { managerCommand: false });
 
 		const pi = makeFakePi();
