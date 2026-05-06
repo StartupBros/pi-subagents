@@ -25,9 +25,9 @@ import {
 } from "../support/helpers.ts";
 
 // Top-level await: try importing pi-dependent modules
-const utils = await tryImport<any>("./utils.ts");
-const execution = await tryImport<any>("./execution.ts");
-const executorMod = await tryImport<any>("./subagent-executor.ts");
+const utils = await tryImport<any>("./src/shared/utils.ts");
+const execution = await tryImport<any>("./src/runs/foreground/execution.ts");
+const executorMod = await tryImport<any>("./src/runs/foreground/subagent-executor.ts");
 const piAvailable = !!(execution && utils);
 
 const runSync = execution?.runSync;
@@ -209,6 +209,45 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(result.details?.results?.[0]?.savedOutputPath, outputPath);
 	});
 
+	it("top-level parallel file-only output aggregates concise file references", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Parallel full report\nwith details" });
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"parallel-file-only-output",
+			{ tasks: [{ agent: "echo", task: "Write report", output: "parallel-file-only.md", outputMode: "file-only" }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const outputPath = path.join(tempDir, "parallel-file-only.md");
+		const text = result.content[0]?.text ?? "";
+		assert.equal(result.isError, undefined);
+		assert.match(text, /Output saved to:/);
+		assert.match(text, /2 lines/);
+		assert.doesNotMatch(text, /Parallel full report/);
+		assert.match(result.details?.results?.[0]?.finalOutput ?? "", /Output saved to:/);
+		assert.doesNotMatch(result.details?.results?.[0]?.finalOutput ?? "", /Parallel full report/);
+		assert.equal(fs.readFileSync(outputPath, "utf-8"), "Parallel full report\nwith details");
+	});
+
+	it("rejects top-level parallel file-only output without an output path", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"parallel-file-only-missing-output",
+			{ tasks: [{ agent: "echo", task: "Write report", outputMode: "file-only" }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /outputMode: "file-only"/);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
 	it("rejects duplicate top-level parallel output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const executor = makeExecutor();
 
@@ -228,6 +267,28 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(result.isError, true);
 		assert.match(result.content[0]?.text ?? "", /same path/);
 		assert.equal(mockPi.callCount(), 0);
+	});
+
+	it("treats string false as disabled output in top-level parallel runs", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Review done" });
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"parallel-string-false-output",
+			{
+				tasks: [
+					{ agent: "echo", task: "Review A", output: "false" },
+					{ agent: "echo", task: "Review B", output: "false" },
+				],
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(mockPi.callCount(), 2);
+		assert.equal(fs.existsSync(path.join(tempDir, "false")), false);
 	});
 
 	it("top-level parallel reads are injected once with chain-style prefix", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
@@ -263,5 +324,22 @@ Inspect`);
 		const args = readLastCallArgs();
 		assert.ok((args.at(-1) ?? "").includes(`Update progress at: ${path.join(tempDir, "progress.md")}`));
 		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), true);
+	});
+
+	it("top-level parallel suppresses progress when the task is review-only", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Review done" });
+		const executor = makeExecutor([makeAgent("reviewer", { defaultProgress: true })]);
+
+		await executor.execute(
+			"parallel-read-only-progress",
+			{ tasks: [{ agent: "reviewer", task: "Review-only. Do not edit files. Return findings." }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const taskArg = readLastCallArgs().at(-1) ?? "";
+		assert.doesNotMatch(taskArg, /progress\.md/);
+		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
 	});
 });

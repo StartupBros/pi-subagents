@@ -18,7 +18,7 @@ type RenderSubagentResult = (
 ) => { render(width: number): string[] };
 
 let renderSubagentResult: RenderSubagentResult | undefined;
-({ renderSubagentResult } = await import("../../render.ts") as {
+({ renderSubagentResult } = await import("../../src/tui/render.ts") as {
 	renderSubagentResult?: RenderSubagentResult;
 });
 
@@ -299,7 +299,7 @@ describe("renderSubagentResult fork indicator", () => {
 		assert.doesNotMatch(lines[pendingIndex + 1] ?? "", /Done \(no text output\)/);
 	});
 
-	it("uses agent labels and the tracked progress index for live parallel rendering", () => {
+	it("uses running/done wording and agent fractions for live parallel rendering", () => {
 		const widget = renderSubagentResult!({
 			content: [{ type: "text", text: "(running...)" }],
 			details: {
@@ -323,13 +323,192 @@ describe("renderSubagentResult fork indicator", () => {
 						durationMs: 10,
 					},
 				}],
+				progress: [{
+					index: 0,
+					agent: "scout",
+					status: "running",
+					task: "first",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 0,
+					tokens: 0,
+					durationMs: 10,
+				}],
 			},
 		}, { expanded: false }, theme);
 
 		const text = widget.render(120).join("\n");
-		assert.match(text, /parallel · agent 1\/3/);
-		assert.match(text, /Agent 3: worker/);
+		assert.match(text, /parallel · 2 agents running · 0\/3 done/);
+		assert.match(text, /Agent 3\/3: worker/);
 		assert.doesNotMatch(text, /Step 3: worker/);
 		assert.doesNotMatch(text, /Agent 1: worker/);
+	});
+
+	it("shows mixed done/running counters for top-level parallel mode", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "(running...)" }],
+			details: {
+				mode: "parallel",
+				totalSteps: 3,
+				results: [{
+					agent: "scout",
+					task: "first",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progress: { index: 0, agent: "scout", status: "completed", task: "first", recentTools: [], recentOutput: [], toolCount: 1, tokens: 0, durationMs: 10 },
+				}, {
+					agent: "reviewer",
+					task: "second",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progress: { index: 1, agent: "reviewer", status: "running", task: "second", recentTools: [], recentOutput: [], toolCount: 1, tokens: 0, durationMs: 10 },
+				}],
+				progress: [{ index: 0, agent: "scout", status: "completed", task: "first", recentTools: [], recentOutput: [], toolCount: 1, tokens: 0, durationMs: 10 }, { index: 1, agent: "reviewer", status: "running", task: "second", recentTools: [], recentOutput: [], toolCount: 1, tokens: 0, durationMs: 10 }],
+			},
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /parallel · 1 agent running · 1\/3 done/);
+	});
+
+	it("labels active chain parallel groups with chain step and agent fractions", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "running" }],
+			details: {
+				mode: "chain",
+				totalSteps: 3,
+				currentStepIndex: 0,
+				chainAgents: ["[scout+reviewer+worker]", "planner", "writer"],
+				results: [{
+					agent: "scout",
+					task: "scan",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progress: { index: 0, agent: "scout", status: "running", task: "scan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+				}, {
+					agent: "reviewer",
+					task: "review",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progress: { index: 1, agent: "reviewer", status: "running", task: "review", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+				}],
+				progress: [{ index: 0, agent: "scout", status: "running", task: "scan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 }, { index: 1, agent: "reviewer", status: "running", task: "review", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 }],
+			},
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /chain · step 1\/3 · parallel group: 2 agents running · 0\/3 done/);
+		assert.match(text, /Agent 1\/3: scout/);
+		assert.match(text, /Agent 2\/3: reviewer/);
+		assert.doesNotMatch(text, /Step 1: scout/);
+	});
+
+	it("shows only the active parallel group for mixed chains after a serial step", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "running" }],
+			details: {
+				mode: "chain",
+				totalSteps: 3,
+				currentStepIndex: 1,
+				chainAgents: ["planner", "[scout+reviewer]", "writer"],
+				results: [{
+					agent: "planner",
+					task: "plan",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progress: { index: 0, agent: "planner", status: "completed", task: "plan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+				}, {
+					agent: "scout",
+					task: "scan",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progress: { index: 1, agent: "scout", status: "running", task: "scan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+				}, {
+					agent: "reviewer",
+					task: "review",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progress: { index: 2, agent: "reviewer", status: "running", task: "review", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+				}],
+				progress: [
+					{ index: 0, agent: "planner", status: "completed", task: "plan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+					{ index: 1, agent: "scout", status: "running", task: "scan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+					{ index: 2, agent: "reviewer", status: "running", task: "review", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+				],
+			},
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /chain · step 2\/3 · parallel group: 2 agents running · 0\/2 done/);
+		assert.match(text, /Agent 1\/2: scout/);
+		assert.match(text, /Agent 2\/2: reviewer/);
+		assert.doesNotMatch(text, /planner/);
+		assert.doesNotMatch(text, /Agent 1\/2: planner/);
+	});
+
+	it("uses logical chain progress and agent labels for completed mixed chains", () => {
+		const progress = [
+			{ index: 0, agent: "planner", status: "completed" as const, task: "plan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 1 },
+			{ index: 1, agent: "scout", status: "completed" as const, task: "scan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 1 },
+			{ index: 2, agent: "reviewer", status: "completed" as const, task: "review", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 1 },
+			{ index: 3, agent: "writer", status: "completed" as const, task: "write", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 1 },
+		];
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "done" }],
+			details: {
+				mode: "chain",
+				totalSteps: 3,
+				chainAgents: ["planner", "[scout+reviewer]", "writer"],
+				results: progress.map((entry) => ({
+					agent: entry.agent,
+					task: entry.task,
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progressSummary: { toolCount: 0, tokens: 0, durationMs: 1 },
+				})),
+				progress,
+			},
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /chain · step 3\/3/);
+		assert.match(text, /Step 1: planner/);
+		assert.match(text, /Agent 1\/2: scout/);
+		assert.match(text, /Agent 2\/2: reviewer/);
+		assert.match(text, /Step 3: writer/);
+		assert.doesNotMatch(text, /step 4\/4/);
+	});
+
+	it("keeps serial chain wording for non-parallel steps", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "running" }],
+			details: {
+				mode: "chain",
+				totalSteps: 3,
+				currentStepIndex: 0,
+				chainAgents: ["scout", "reviewer", "worker"],
+				results: [{
+					agent: "scout",
+					task: "scan",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					progress: { index: 0, agent: "scout", status: "running", task: "scan", recentTools: [], recentOutput: [], toolCount: 0, tokens: 0, durationMs: 0 },
+				}],
+			},
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /chain · step 1\/3/);
+		assert.match(text, /Step 1: scout/);
+		assert.doesNotMatch(text, /parallel group:/);
 	});
 });

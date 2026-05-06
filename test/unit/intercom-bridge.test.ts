@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import type { AgentConfig } from "../../agents.ts";
+import type { AgentConfig } from "../../src/agents/agents.ts";
 import {
 	applyIntercomBridgeToAgent,
 	diagnoseIntercomBridge,
@@ -12,7 +12,7 @@ import {
 	resolveSubagentIntercomTarget,
 	resolveIntercomBridgeMode,
 	type IntercomBridgeState,
-} from "../../intercom-bridge.ts";
+} from "../../src/intercom/intercom-bridge.ts";
 
 function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -71,6 +71,27 @@ function withMalformedIntercomConfig<T>(fn: (paths: { extensionDir: string; conf
 	}
 }
 
+function withPackagedIntercom<T>(fn: (paths: { agentDir: string; cwd: string; globalNpmRoot: string; packageDir: string; legacyDir: string; configPath: string }) => T): T {
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-intercom-package-test-"));
+	const agentDir = path.join(tempDir, "agent");
+	const cwd = path.join(tempDir, "workspace");
+	const globalNpmRoot = path.join(tempDir, "global-node_modules");
+	const packageDir = path.join(globalNpmRoot, "pi-intercom");
+	const legacyDir = path.join(agentDir, "extensions", "pi-intercom");
+	const configPath = path.join(agentDir, "intercom", "config.json");
+	fs.mkdirSync(packageDir, { recursive: true });
+	fs.mkdirSync(path.dirname(configPath), { recursive: true });
+	fs.mkdirSync(cwd, { recursive: true });
+	fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-intercom"] }, null, 2));
+	fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "pi-intercom", pi: { extensions: ["./index.ts"] } }, null, 2));
+	fs.writeFileSync(configPath, JSON.stringify({ enabled: true }));
+	try {
+		return fn({ agentDir, cwd, globalNpmRoot, packageDir, legacyDir, configPath });
+	} finally {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	}
+}
+
 describe("diagnoseIntercomBridge", () => {
 	it("reports inactive and unavailable when pi-intercom is missing", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-intercom-diagnostic-test-"));
@@ -89,6 +110,24 @@ describe("diagnoseIntercomBridge", () => {
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+
+	it("finds npm-installed pi-intercom packages without the legacy extension directory", () => {
+		withPackagedIntercom(({ agentDir, cwd, globalNpmRoot, packageDir, legacyDir, configPath }) => {
+			const diagnostic = diagnoseIntercomBridge({
+				config: { mode: "always" },
+				context: "fresh",
+				orchestratorTarget: "main",
+				agentDir,
+				cwd,
+				globalNpmRoot,
+				extensionDir: legacyDir,
+				configPath,
+			});
+			assert.equal(diagnostic.active, true);
+			assert.equal(diagnostic.piIntercomAvailable, true);
+			assert.equal(diagnostic.extensionDir, path.resolve(packageDir));
+		});
 	});
 
 	it("preserves malformed intercom config errors while matching runtime enabled behavior", () => {
@@ -143,6 +182,24 @@ describe("resolveIntercomBridge", () => {
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+
+	it("activates from an npm-installed pi-intercom package", () => {
+		withPackagedIntercom(({ agentDir, cwd, globalNpmRoot, packageDir, legacyDir, configPath }) => {
+			const bridge = resolveIntercomBridge({
+				config: { mode: "always" },
+				context: "fresh",
+				orchestratorTarget: "main",
+				agentDir,
+				cwd,
+				globalNpmRoot,
+				extensionDir: legacyDir,
+				configPath,
+			});
+			assert.equal(bridge.active, true);
+			assert.equal(bridge.extensionDir, path.resolve(packageDir));
+			assert.equal(bridge.orchestratorTarget, "main");
+		});
 	});
 
 	it("stays inactive when intercom config is disabled", () => {
@@ -232,6 +289,9 @@ describe("resolveIntercomBridge", () => {
 			assert.equal(bridge.active, true);
 			assert.match(bridge.instruction, /reference-only/i);
 			assert.match(bridge.instruction, /normal assistant text/i);
+			assert.match(bridge.instruction, /contact_supervisor/);
+			assert.match(bridge.instruction, /need_decision/);
+			assert.match(bridge.instruction, /progress_update/);
 			assert.match(bridge.instruction, /focused task result/i);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
@@ -245,20 +305,21 @@ describe("applyIntercomBridgeToAgent", () => {
 		mode: "always",
 		orchestratorTarget: "main",
 		extensionDir: "/Users/test/.pi/agent/extensions/pi-intercom",
-		instruction: "Intercom orchestration channel:\n- Need a decision or blocked: intercom({ action: \"ask\", to: \"main\", message: \"<question>\" })\n- Blocked/update: intercom({ action: \"send\", to: \"main\", message: \"UPDATE: <summary>\" })",
+		instruction: "Intercom orchestration channel:\n- Need a decision or blocked: contact_supervisor({ reason: \"need_decision\", message: \"<question>\" })\n- Blocked/update: contact_supervisor({ reason: \"progress_update\", message: \"UPDATE: <summary>\" })",
 	};
 
 	it("injects intercom tool and prompt instructions", () => {
 		const updated = applyIntercomBridgeToAgent(makeAgent({ tools: ["read", "bash"] }), activeBridge);
-		assert.deepEqual(updated.tools, ["read", "bash", "intercom"]);
+		assert.deepEqual(updated.tools, ["read", "bash", "intercom", "contact_supervisor"]);
 		assert.match(updated.systemPrompt, /Intercom orchestration channel:/);
-		assert.match(updated.systemPrompt, /action: "ask"/);
+		assert.match(updated.systemPrompt, /contact_supervisor/);
 	});
 
 	it("is idempotent", () => {
 		const first = applyIntercomBridgeToAgent(makeAgent({ tools: ["read"] }), activeBridge);
 		const second = applyIntercomBridgeToAgent(first, activeBridge);
 		assert.equal(second.tools?.filter((tool) => tool === "intercom").length, 1);
+		assert.equal(second.tools?.filter((tool) => tool === "contact_supervisor").length, 1);
 		assert.equal(second.systemPrompt, first.systemPrompt);
 	});
 

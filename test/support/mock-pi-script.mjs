@@ -67,6 +67,17 @@ function isJsonMode(args) {
 	return false;
 }
 
+function writeSessionFile(args) {
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] !== "--session") continue;
+		const sessionFile = args[i + 1];
+		if (!sessionFile) return;
+		fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+		fs.writeFileSync(sessionFile, "", { flag: "a" });
+		return;
+	}
+}
+
 function writeJsonlLine(entry) {
 	const line = typeof entry === "string" ? entry : JSON.stringify(entry);
 	process.stdout.write(`${line}\n`);
@@ -100,11 +111,13 @@ async function main() {
 	if (!queueDir) fail("MOCK_PI_QUEUE_DIR is required.");
 	if (!fs.existsSync(queueDir)) fail(`Mock queue dir does not exist: ${queueDir}`);
 
-	const jsonMode = isJsonMode(process.argv.slice(2));
+	const args = process.argv.slice(2);
+	const jsonMode = isJsonMode(args);
 	const response = claimNextResponse(queueDir) ?? defaultResponse();
+	writeSessionFile(args);
 	fs.writeFileSync(
 		path.join(queueDir, `call-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`),
-		JSON.stringify({ args: process.argv.slice(2) }),
+		JSON.stringify({ args }),
 		"utf-8",
 	);
 
@@ -137,6 +150,10 @@ async function main() {
 
 	if (typeof response.stderr === "string" && response.stderr.length > 0) {
 		process.stderr.write(response.stderr);
+	}
+
+	if (typeof response.keepAliveAfterFinalMessageMs === "number" && response.keepAliveAfterFinalMessageMs > 0) {
+		await new Promise((resolve) => setTimeout(resolve, response.keepAliveAfterFinalMessageMs));
 	}
 
 	process.exit(typeof response.exitCode === "number" ? response.exitCode : 0);

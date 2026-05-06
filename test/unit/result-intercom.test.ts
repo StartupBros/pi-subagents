@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
 	buildSubagentResultIntercomPayload,
 	formatSubagentResultReceipt,
 	resolveSubagentResultStatus,
 	stripDetailsOutputsForIntercomReceipt,
-} from "../../result-intercom.ts";
+} from "../../src/intercom/result-intercom.ts";
 
 describe("result intercom formatter", () => {
 	it("builds one grouped intercom payload with status counts and child sections", () => {
@@ -42,12 +45,73 @@ describe("result intercom formatter", () => {
 		assert.match(payload.message, /Status: failed/);
 		assert.match(payload.message, /Children: 1 completed, 1 failed/);
 		assert.match(payload.message, /Chain steps: 4/);
-		assert.match(payload.message, /For clarification, message a listed subagent at its Intercom target\./);
+		assert.match(payload.message, /Intercom targets below identify child sessions used while they were running/);
 		assert.match(payload.message, /1\. reviewer-a — completed/);
-		assert.match(payload.message, /Intercom target: subagent-reviewer-a-run-123-1/);
+		assert.match(payload.message, /Run intercom target: subagent-reviewer-a-run-123-1/);
 		assert.match(payload.message, /2\. reviewer-b — failed/);
 		assert.match(payload.message, /Output artifact: \/tmp\/a\.md/);
 		assert.match(payload.message, /Session: \/tmp\/a-session\.jsonl/);
+	});
+
+	it("advertises async revive only for single-child results with an existing session", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-intercom-"));
+		try {
+			const sessionPath = path.join(root, "session.jsonl");
+			fs.writeFileSync(sessionPath, "", "utf-8");
+			const payload = buildSubagentResultIntercomPayload({
+				to: "chat",
+				runId: "run-single",
+				mode: "single",
+				source: "async",
+				asyncId: "run-single",
+				children: [{ agent: "worker", status: "completed", summary: "done", sessionPath }],
+			});
+
+			assert.match(payload.message, /Revive: subagent\(\{ action: "resume", id: "run-single", message: "\.\.\." \}\)/);
+			assert.doesNotMatch(payload.message, /unsupported for multi-child/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("advertises indexed revive for multi-child async results with existing child sessions", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-intercom-"));
+		try {
+			const firstSession = path.join(root, "a.jsonl");
+			const secondSession = path.join(root, "b.jsonl");
+			fs.writeFileSync(firstSession, "", "utf-8");
+			fs.writeFileSync(secondSession, "", "utf-8");
+			const payload = buildSubagentResultIntercomPayload({
+				to: "chat",
+				runId: "run-multi",
+				mode: "parallel",
+				source: "async",
+				asyncId: "run-multi",
+				children: [
+					{ agent: "a", status: "completed", summary: "done", sessionPath: firstSession },
+					{ agent: "b", status: "completed", summary: "done", sessionPath: secondSession },
+				],
+			});
+
+			assert.match(payload.message, /Revive child: subagent\(\{ action: "resume", id: "run-multi", index: 0, message: "\.\.\." \}\)/);
+			assert.doesNotMatch(payload.message, /unsupported for multi-child/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not advertise async revive for missing child session files", () => {
+		const payload = buildSubagentResultIntercomPayload({
+			to: "chat",
+			runId: "run-missing-session",
+			mode: "single",
+			source: "async",
+			asyncId: "run-missing-session",
+			children: [{ agent: "worker", status: "failed", summary: "failed", sessionPath: path.join(os.tmpdir(), "missing-pi-session.jsonl") }],
+		});
+
+		assert.match(payload.message, /Resume: unavailable; no child session file was persisted/);
+		assert.doesNotMatch(payload.message, /Revive:/);
 	});
 
 	it("keeps full child summaries inside grouped payloads", () => {
@@ -83,7 +147,7 @@ describe("result intercom formatter", () => {
 		assert.match(receipt, /Delivered parallel subagent results via intercom\./);
 		assert.match(receipt, /Children: 1 completed, 1 failed/);
 		assert.match(receipt, /Artifacts:\n- a \[completed\]: \/tmp\/a\.md/);
-		assert.match(receipt, /Intercom targets:\n- a \[completed\]: subagent-a-run-abc-1/);
+		assert.match(receipt, /Run intercom targets \(may be inactive after completion\):\n- a \[completed\]: subagent-a-run-abc-1/);
 		assert.match(receipt, /Sessions:\n- b \[failed\]: \/tmp\/b\.jsonl/);
 		assert.match(receipt, /Full grouped output was sent over intercom\./);
 	});

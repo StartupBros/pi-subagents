@@ -3,10 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import { ASYNC_DIR, INTERCOM_DETACH_REQUEST_EVENT, RESULTS_DIR } from "../../src/shared/types.ts";
 import type { MockPi } from "../support/helpers.ts";
 import {
 	createMockPi,
 	createTempDir,
+	events,
 	makeAgent,
 	makeMinimalCtx,
 	removeTempDir,
@@ -18,7 +20,9 @@ interface ExecutorResult {
 	isError?: boolean;
 	details?: {
 		mode?: string;
+		runId?: string;
 		results?: Array<{ agent?: string; finalOutput?: string }>;
+		asyncId?: string;
 	};
 }
 
@@ -34,7 +38,7 @@ interface ExecutorModule {
 	};
 }
 
-const executorMod = await tryImport<ExecutorModule>("./subagent-executor.ts");
+const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
 const available = !!executorMod?.createSubagentExecutor;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
 
@@ -106,31 +110,47 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		removeTempDir(tempDir);
 	});
 
+	async function readMockCallArgs(index: number): Promise<string[]> {
+		const deadline = Date.now() + 10_000;
+		let callFile: string | undefined;
+		while (!callFile) {
+			callFile = fs.readdirSync(mockPi.dir)
+				.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+				.sort()[index];
+			if (callFile || Date.now() > deadline) break;
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		assert.ok(callFile, `expected mock pi call at index ${index}`);
+		return JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
+	}
+
 	function makeExecutor(options: { bridgeMode?: "always" | "off"; agents?: ReturnType<typeof makeAgent>[]; acknowledgeResults?: boolean } = {}) {
 		const events = createRecordingEventBus({ acknowledgeResults: options.acknowledgeResults ?? true });
+		const state = {
+			baseCwd: tempDir,
+			currentSessionId: null,
+			asyncJobs: new Map(),
+			foregroundRuns: new Map(),
+			foregroundControls: new Map(),
+			lastForegroundControlId: null,
+			cleanupTimers: new Map(),
+			lastUiContext: null,
+			poller: null,
+			completionSeen: new Map(),
+			watcher: null,
+			watcherRestartTimer: null,
+			resultFileCoalescer: {
+				schedule: () => false,
+				clear: () => {},
+			},
+		};
 		const executor = createSubagentExecutor!({
 			pi: {
 				events,
 				getSessionName: () => "orchestrator",
 				setSessionName: () => {},
 			},
-			state: {
-				baseCwd: tempDir,
-				currentSessionId: null,
-				asyncJobs: new Map(),
-				foregroundControls: new Map(),
-				lastForegroundControlId: null,
-				cleanupTimers: new Map(),
-				lastUiContext: null,
-				poller: null,
-				completionSeen: new Map(),
-				watcher: null,
-				watcherRestartTimer: null,
-				resultFileCoalescer: {
-					schedule: () => false,
-					clear: () => {},
-				},
-			},
+			state,
 			config: {
 				intercomBridge: { mode: options.bridgeMode ?? "always" },
 			},
@@ -140,7 +160,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			expandTilde: (value: string) => value,
 			discoverAgents: () => ({ agents: options.agents ?? [makeAgent("worker")] }),
 		});
-		return { executor, events };
+		return { executor, events, state };
 	}
 
 	it("single foreground runs emit one grouped event and return a compact receipt", async () => {
@@ -162,8 +182,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(payload.children?.length, 1);
 		assert.equal(payload.children?.[0]?.agent, "worker");
 		assert.match(payload.children?.[0]?.intercomTarget ?? "", /^subagent-worker-[a-f0-9]+-1$/);
-		assert.match(String(payload.message ?? ""), /For clarification, message a listed subagent at its Intercom target\./);
-		assert.match(String(payload.message ?? ""), /Intercom target: subagent-worker-[a-f0-9]+-1/);
+		assert.match(String(payload.message ?? ""), /Intercom targets below identify child sessions used while they were running/);
+		assert.match(String(payload.message ?? ""), /Run intercom target: subagent-worker-[a-f0-9]+-1/);
 		assert.match(result.content[0]?.text ?? "", /Delivered single subagent result via intercom\./);
 		assert.doesNotMatch(result.content[0]?.text ?? "", /Full child output from worker/);
 		assert.equal(result.details?.results?.[0]?.finalOutput, undefined);
@@ -176,7 +196,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 
 		const result = await executor.execute(
 			"single-no-intercom",
-			{ agent: "worker", task: "Implement feature" },
+			{ agent: "worker", task: "Summarize feature" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
@@ -192,7 +212,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 
 		const result = await executor.execute(
 			"single-no-ack",
-			{ agent: "worker", task: "Implement feature" },
+			{ agent: "worker", task: "Summarize feature" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
@@ -220,8 +240,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(payload.mode, "parallel");
 		assert.deepEqual((payload.children ?? []).map((child) => child.agent).sort(), ["a", "b"]);
 		assert.equal((payload.children ?? []).every((child) => /^subagent-[ab]-[a-f0-9]+-[12]$/.test(child.intercomTarget ?? "")), true);
-		assert.match(String(payload.message ?? ""), /For clarification, message a listed subagent at its Intercom target\./);
-		assert.match(String(payload.message ?? ""), /Intercom target: subagent-a-[a-f0-9]+-1/);
+		assert.match(String(payload.message ?? ""), /Intercom targets below identify child sessions used while they were running/);
+		assert.match(String(payload.message ?? ""), /Run intercom target: subagent-a-[a-f0-9]+-1/);
 		assert.match(String(payload.message ?? ""), /1\. a — completed/);
 		assert.match(String(payload.message ?? ""), /2\. b — completed/);
 		assert.match(result.content[0]?.text ?? "", /Delivered parallel subagent results via intercom\./);
@@ -256,6 +276,418 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(String(payload.message ?? ""), /3\. c — completed/);
 		assert.match(result.content[0]?.text ?? "", /Delivered chain subagent results via intercom\./);
 		assert.equal(result.details?.results?.every((entry) => entry.finalOutput === undefined), true);
+	});
+
+	it("detached chain runs do not emit grouped completion receipts", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("after reply")] },
+			],
+		});
+		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" }), makeAgent("b")] });
+		let detachEmitted = false;
+
+		const result = await executor.execute(
+			"chain-detached-intercom",
+			{
+				chain: [
+					{ agent: "a", task: "ask supervisor" },
+					{ agent: "b", task: "must not run" },
+				],
+			},
+			new AbortController().signal,
+			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
+				if (detachEmitted) return;
+				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
+				detachEmitted = true;
+				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "chain-detached" });
+			},
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(detachEmitted, true);
+		assert.match(result.content[0]?.text ?? "", /Chain detached for intercom coordination/);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /resume/);
+		assert.equal(bus.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("resume action sends a follow-up to a live async child when the target is registered", async () => {
+		const runId = `resume-live-${Date.now()}`;
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "running",
+				startedAt: 100,
+				lastUpdate: 100,
+				steps: [{ agent: "worker", status: "running" }],
+			}, null, 2), "utf-8");
+			const { executor, events } = makeExecutor();
+
+			const result = await executor.execute(
+				"resume-live",
+				{ action: "resume", id: runId, message: "Can you clarify the last change?" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, undefined);
+			assert.match(result.content[0]?.text ?? "", /Delivered follow-up to live async child/);
+			const payload = events.emitted.find((entry) => entry.channel === "subagent:result-intercom")?.payload as { to?: string; message?: string } | undefined;
+			assert.equal(payload?.to, `subagent-worker-${runId}-1`);
+			assert.match(payload?.message ?? "", /Can you clarify the last change\?/);
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resume action revives completed multi-child async runs by index", async () => {
+		mockPi.onCall({ output: "revived async child b" });
+		const runId = `resume-revive-multi-${Date.now()}`;
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		const firstSession = path.join(tempDir, "child-a.jsonl");
+		const secondSession = path.join(tempDir, "child-b.jsonl");
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(firstSession, "", "utf-8");
+			fs.writeFileSync(secondSession, "", "utf-8");
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "parallel",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: tempDir,
+				steps: [
+					{ agent: "a", status: "complete", sessionFile: firstSession },
+					{ agent: "b", status: "complete", sessionFile: secondSession },
+				],
+			}, null, 2), "utf-8");
+			const { executor } = makeExecutor({ agents: [makeAgent("a"), makeAgent("b")] });
+
+			const result = await executor.execute(
+				"resume-revive-multi",
+				{ action: "resume", id: runId, index: 1, message: "What did b find?" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, undefined);
+			assert.match(result.content[0]?.text ?? "", /Revived async subagent from/);
+			assert.match(result.content[0]?.text ?? "", /Agent: b/);
+			assert.match(result.content[0]?.text ?? "", new RegExp(secondSession.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			const args = await readMockCallArgs(0);
+			assert.equal(args[args.indexOf("--session") + 1], secondSession);
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resume action revives completed async runs with no-poll handoff guidance", async () => {
+		mockPi.onCall({ output: "revived answer" });
+		const runId = `resume-revive-${Date.now()}`;
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		const sessionFile = path.join(tempDir, "child-session.jsonl");
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: tempDir,
+				sessionFile,
+				steps: [{ agent: "worker", status: "complete" }],
+			}, null, 2), "utf-8");
+			const { executor } = makeExecutor();
+
+			const result = await executor.execute(
+				"resume-revive",
+				{ action: "resume", id: runId, message: "What changed?" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, undefined);
+			assert.match(result.content[0]?.text ?? "", /Revived async subagent from/);
+			assert.match(result.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
+			assert.match(result.content[0]?.text ?? "", /end your turn now/);
+			assert.match(result.content[0]?.text ?? "", /Status if needed: subagent\(\{ action: "status"/);
+			assert.doesNotMatch(result.content[0]?.text ?? "", /Follow:/);
+			const revivedId = result.details?.asyncId;
+			assert.ok(revivedId, "expected revived async id");
+			const resultPath = path.join(RESULTS_DIR, `${revivedId}.json`);
+			const deadline = Date.now() + 10_000;
+			while (!fs.existsSync(resultPath)) {
+				if (Date.now() > deadline) assert.fail(`Timed out waiting for revived result file: ${resultPath}`);
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resume action revives a completed foreground child by index", async () => {
+		mockPi.onCall({ output: "first child done" });
+		mockPi.onCall({ output: "second child done" });
+		mockPi.onCall({ output: "revived foreground answer" });
+		const { executor } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a"), makeAgent("b")] });
+
+		const original = await executor.execute(
+			"foreground-resume-original",
+			{ tasks: [{ agent: "a", task: "task-a" }, { agent: "b", task: "task-b" }] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+
+		const revived = await executor.execute(
+			"foreground-resume",
+			{ action: "resume", id: runId, index: 1, message: "Follow up with b" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(revived.isError, undefined);
+		assert.match(revived.content[0]?.text ?? "", /Revived foreground subagent from/);
+		assert.match(revived.content[0]?.text ?? "", /Agent: b/);
+		const reviveArgs = await readMockCallArgs(2);
+		const selectedSession = original.details?.results?.[1]?.sessionFile;
+		assert.ok(selectedSession, "expected selected child session file");
+		assert.equal(reviveArgs[reviveArgs.indexOf("--session") + 1], selectedSession);
+		const revivedId = revived.details?.asyncId;
+		assert.ok(revivedId, "expected revived async id");
+		const resultPath = path.join(RESULTS_DIR, `${revivedId}.json`);
+		const deadline = Date.now() + 10_000;
+		while (!fs.existsSync(resultPath)) {
+			if (Date.now() > deadline) assert.fail(`Timed out waiting for revived result file: ${resultPath}`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	});
+
+	it("resume action rejects detached foreground children that may still be live", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("after reply")] },
+			],
+		});
+		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
+		let detachEmitted = false;
+		const original = await executor.execute(
+			"foreground-detached-original",
+			{ agent: "a", task: "ask supervisor" },
+			new AbortController().signal,
+			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
+				if (detachEmitted) return;
+				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
+				detachEmitted = true;
+				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "single-detached" });
+			},
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(detachEmitted, true);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+
+		const resumed = await executor.execute(
+			"foreground-detached-resume",
+			{ action: "resume", id: runId, message: "Follow up" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(resumed.isError, true);
+		assert.match(resumed.content[0]?.text ?? "", /detached for intercom coordination/);
+		assert.match(resumed.content[0]?.text ?? "", /Reply to the supervisor request first/);
+		assert.doesNotMatch(resumed.content[0]?.text ?? "", /revive only/);
+	});
+
+	it("resume action keeps exact foreground validation errors over async prefix matches", async () => {
+		const base = `exact-invalid-${Date.now()}`;
+		const asyncSession = path.join(tempDir, "async-exact-prefix.jsonl");
+		fs.writeFileSync(asyncSession, "", "utf-8");
+		const asyncDir = path.join(ASYNC_DIR, `${base}-async`);
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: `${base}-async`,
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: tempDir,
+				steps: [{ agent: "a", status: "complete", sessionFile: asyncSession }],
+			}, null, 2), "utf-8");
+			const { executor, state } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a")] });
+			state.foregroundRuns.set(base, {
+				runId: base,
+				mode: "single",
+				cwd: tempDir,
+				updatedAt: Date.now(),
+				children: [{ agent: "a", index: 0, status: "completed" }],
+			});
+
+			const result = await executor.execute(
+				"resume-exact-invalid-foreground",
+				{ action: "resume", id: base, message: "Follow up" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /Foreground run '.+' child 0 does not have a persisted session file/);
+			assert.equal(mockPi.callCount(), 0);
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resume action keeps exact async validation errors over foreground prefix matches", async () => {
+		const base = `exact-invalid-async-${Date.now()}`;
+		const foregroundSession = path.join(tempDir, "foreground-exact-prefix.jsonl");
+		fs.writeFileSync(foregroundSession, "", "utf-8");
+		const asyncDir = path.join(ASYNC_DIR, base);
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: base,
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: tempDir,
+				steps: [{ agent: "a", status: "complete" }],
+			}, null, 2), "utf-8");
+			const { executor, state } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a")] });
+			state.foregroundRuns.set(`${base}-foreground`, {
+				runId: `${base}-foreground`,
+				mode: "single",
+				cwd: tempDir,
+				updatedAt: Date.now(),
+				children: [{ agent: "a", index: 0, status: "completed", sessionFile: foregroundSession }],
+			});
+
+			const result = await executor.execute(
+				"resume-exact-invalid-async",
+				{ action: "resume", id: base, message: "Follow up" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /Async run '.+' child 0 does not have a persisted session file/);
+			assert.equal(mockPi.callCount(), 0);
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resume action reports async ambiguity even when foreground has one prefix match", async () => {
+		const base = `namespace-ambiguous-${Date.now()}`;
+		const foregroundSession = path.join(tempDir, "foreground-prefix.jsonl");
+		const firstAsyncSession = path.join(tempDir, "async-a.jsonl");
+		const secondAsyncSession = path.join(tempDir, "async-b.jsonl");
+		fs.writeFileSync(foregroundSession, "", "utf-8");
+		fs.writeFileSync(firstAsyncSession, "", "utf-8");
+		fs.writeFileSync(secondAsyncSession, "", "utf-8");
+		const firstAsyncDir = path.join(ASYNC_DIR, `${base}-async-a`);
+		const secondAsyncDir = path.join(ASYNC_DIR, `${base}-async-b`);
+		try {
+			for (const [asyncDir, runId, sessionFile] of [[firstAsyncDir, `${base}-async-a`, firstAsyncSession], [secondAsyncDir, `${base}-async-b`, secondAsyncSession]] as const) {
+				fs.mkdirSync(asyncDir, { recursive: true });
+				fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+					runId,
+					mode: "single",
+					state: "complete",
+					startedAt: 100,
+					lastUpdate: 200,
+					cwd: tempDir,
+					steps: [{ agent: "a", status: "complete", sessionFile }],
+				}, null, 2), "utf-8");
+			}
+			const { executor, state } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a")] });
+			state.foregroundRuns.set(`${base}-foreground`, {
+				runId: `${base}-foreground`,
+				mode: "single",
+				cwd: tempDir,
+				updatedAt: Date.now(),
+				children: [{ agent: "a", index: 0, status: "completed", sessionFile: foregroundSession }],
+			});
+
+			const result = await executor.execute(
+				"ambiguous-async-prefix-resume",
+				{ action: "resume", id: base, message: "Follow up" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /Ambiguous async run id prefix/);
+		} finally {
+			fs.rmSync(firstAsyncDir, { recursive: true, force: true });
+			fs.rmSync(secondAsyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resume action reports ambiguous ids across remembered foreground and async runs", async () => {
+		const base = `ambiguous-${Date.now()}`;
+		const foregroundSession = path.join(tempDir, "foreground.jsonl");
+		const asyncSession = path.join(tempDir, "async.jsonl");
+		const asyncId = `${base}-async`;
+		const foregroundId = `${base}-foreground`;
+		const asyncDir = path.join(ASYNC_DIR, asyncId);
+		fs.writeFileSync(foregroundSession, "", "utf-8");
+		fs.writeFileSync(asyncSession, "", "utf-8");
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: asyncId,
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: tempDir,
+				steps: [{ agent: "a", status: "complete", sessionFile: asyncSession }],
+			}, null, 2), "utf-8");
+			const { executor, state } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a")] });
+			state.foregroundRuns.set(foregroundId, {
+				runId: foregroundId,
+				mode: "single",
+				cwd: tempDir,
+				updatedAt: Date.now(),
+				children: [{ agent: "a", index: 0, status: "completed", sessionFile: foregroundSession }],
+			});
+
+			const result = await executor.execute(
+				"ambiguous-resume",
+				{ action: "resume", id: base, message: "Follow up" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, true);
+			assert.match(result.content[0]?.text ?? "", /ambiguous between foreground run/);
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
 	});
 
 	it("mixed foreground outcomes produce failed grouped status and receipt counts", async () => {

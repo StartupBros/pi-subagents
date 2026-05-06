@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mergeAgentsForScope } from "../../agent-selection.ts";
-import type { AgentConfig } from "../../agents.ts";
+import { mergeAgentsForScope } from "../../src/agents/agent-selection.ts";
+import type { AgentConfig } from "../../src/agents/agents.ts";
 
 function makeAgent(name: string, source: "builtin" | "user" | "project", systemPrompt: string): AgentConfig {
 	return {

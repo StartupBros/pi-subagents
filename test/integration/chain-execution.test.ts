@@ -23,13 +23,14 @@ import {
 	tryImport,
 	events,
 } from "../support/helpers.ts";
-import { INTERCOM_DETACH_REQUEST_EVENT } from "../../types.ts";
+import { INTERCOM_DETACH_REQUEST_EVENT } from "../../src/shared/types.ts";
 
 interface TestSequentialStep {
 	agent: string;
 	task?: string;
 	model?: string;
 	output?: string | false;
+	outputMode?: "inline" | "file-only";
 	reads?: string[] | false;
 	skill?: string | string[] | false;
 	progress?: boolean;
@@ -41,6 +42,7 @@ interface TestParallelTask {
 	task?: string;
 	model?: string;
 	output?: string | false;
+	outputMode?: "inline" | "file-only";
 	reads?: string[] | false;
 	skill?: string | string[] | false;
 	progress?: boolean;
@@ -59,6 +61,7 @@ interface ChainResultItem {
 	agent: string;
 	exitCode: number;
 	finalOutput?: string;
+	task?: string;
 	detached?: boolean;
 	attemptedModels?: string[];
 	skills?: string[];
@@ -78,7 +81,7 @@ interface ChainExecutionModule {
 	executeChain(params: Record<string, unknown>): Promise<ChainExecutionResult>;
 }
 
-const chainMod = await tryImport<ChainExecutionModule>("./chain-execution.ts");
+const chainMod = await tryImport<ChainExecutionModule>("./src/runs/foreground/chain-execution.ts");
 const available = !!chainMod;
 const executeChain = chainMod?.executeChain;
 
@@ -125,6 +128,15 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		};
 	}
 
+	function readCallArgs(index: number): string[] {
+		const callFiles = fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.sort();
+		const callFile = callFiles[index];
+		assert.ok(callFile, `expected call ${index}`);
+		return JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
+	}
+
 	function writePackageSkill(packageRoot: string, skillName: string): void {
 		const skillDir = path.join(packageRoot, "skills", skillName);
 		fs.mkdirSync(skillDir, { recursive: true });
@@ -155,6 +167,30 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(result.details.results.length, 2);
 		assert.equal(result.details.results[0].agent, "analyst");
 		assert.equal(result.details.results[1].agent, "reporter");
+	});
+
+	it("passes file-only saved-output references through {previous}", async () => {
+		mockPi.onCall({ output: "full chain output\nwith details" });
+		const agents = [makeAgent("analyst"), makeAgent("reporter")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "analyst", task: "Analyze", output: "analysis.md", outputMode: "file-only" },
+					{ agent: "reporter" },
+				],
+				agents,
+				{ chainDir: tempDir },
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.match(result.details.results[0]?.finalOutput ?? "", /Output saved to:/);
+		assert.doesNotMatch(result.details.results[0]?.finalOutput ?? "", /full chain output/);
+		const secondTaskArg = readCallArgs(1).at(-1) ?? "";
+		assert.match(secondTaskArg, /Output saved to:/);
+		assert.match(secondTaskArg, /2 lines/);
+		assert.doesNotMatch(secondTaskArg, /full chain output/);
 	});
 
 	it("retries chain steps with fallback models on retryable provider failures", async () => {
@@ -218,6 +254,23 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
 		assert.equal(result.details.results[0].model, "github-copilot/gpt-5-mini");
 		assert.deepEqual(result.details.results[0].attemptedModels, ["github-copilot/gpt-5-mini"]);
+	});
+
+	it("suppresses progress for {task} chain templates when the top-level task is review-only", async () => {
+		mockPi.onCall({ output: "Review done" });
+		const agents = [makeAgent("reviewer", { defaultProgress: true })];
+
+		await executeChain(
+			makeChainParams(
+				[{ agent: "reviewer" }],
+				agents,
+				{ task: "Review-only. Do not edit files. Return findings." },
+			),
+		);
+
+		const taskArg = readCallArgs(0).at(-1) ?? "";
+		assert.doesNotMatch(taskArg, /progress\.md/);
+		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
 	});
 
 	it("passes {previous} between steps (step 2 receives step 1 output)", async () => {
@@ -379,22 +432,33 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 	});
 
 	it("tightens child recursion depth per agent without relaxing the inherited chain max", async () => {
-		mockPi.onCall({ echoEnv: ["PI_SUBAGENT_DEPTH", "PI_SUBAGENT_MAX_DEPTH"] });
-		const agents = [makeAgent("worker", { maxSubagentDepth: 1 })];
+		const originalDepth = process.env.PI_SUBAGENT_DEPTH;
+		const originalMaxDepth = process.env.PI_SUBAGENT_MAX_DEPTH;
+		delete process.env.PI_SUBAGENT_DEPTH;
+		delete process.env.PI_SUBAGENT_MAX_DEPTH;
+		try {
+			mockPi.onCall({ echoEnv: ["PI_SUBAGENT_DEPTH", "PI_SUBAGENT_MAX_DEPTH"] });
+			const agents = [makeAgent("worker", { maxSubagentDepth: 1 })];
 
-		const result = await executeChain(
-			makeChainParams(
-				[{ agent: "worker", task: "Inspect env" }],
-				agents,
-				{ maxSubagentDepth: 3 },
-			),
-		);
+			const result = await executeChain(
+				makeChainParams(
+					[{ agent: "worker", task: "Inspect env" }],
+					agents,
+					{ maxSubagentDepth: 3 },
+				),
+			);
 
-		assert.ok(!result.isError);
-		assert.deepEqual(JSON.parse(result.details.results[0].finalOutput ?? "{}"), {
-			PI_SUBAGENT_DEPTH: "1",
-			PI_SUBAGENT_MAX_DEPTH: "1",
-		});
+			assert.ok(!result.isError);
+			assert.deepEqual(JSON.parse(result.details.results[0].finalOutput ?? "{}"), {
+				PI_SUBAGENT_DEPTH: "1",
+				PI_SUBAGENT_MAX_DEPTH: "1",
+			});
+		} finally {
+			if (originalDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
+			else process.env.PI_SUBAGENT_DEPTH = originalDepth;
+			if (originalMaxDepth === undefined) delete process.env.PI_SUBAGENT_MAX_DEPTH;
+			else process.env.PI_SUBAGENT_MAX_DEPTH = originalMaxDepth;
+		}
 	});
 });
 
@@ -437,6 +501,15 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 			clarify: false,
 			...overrides,
 		};
+	}
+
+	function readCallArgs(index: number): string[] {
+		const callFiles = fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.sort();
+		const callFile = callFiles[index];
+		assert.ok(callFile, `expected call ${index}`);
+		return JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
 	}
 
 	it("runs parallel tasks within a chain step", async () => {
@@ -493,6 +566,56 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		);
 	});
 
+	it("aggregates file-only parallel outputs as file references for the next step", async () => {
+		mockPi.onCall({ output: "full parallel chain output\nwith details" });
+		const agents = [makeAgent("reviewer-a"), makeAgent("reviewer-b"), makeAgent("synthesizer")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{
+						parallel: [
+							{ agent: "reviewer-a", task: "Review A", output: "a.md", outputMode: "file-only" },
+							{ agent: "reviewer-b", task: "Review B", output: "b.md", outputMode: "file-only" },
+						],
+					},
+					{ agent: "synthesizer" },
+				],
+				agents,
+				{ chainDir: tempDir },
+			),
+		);
+
+		assert.ok(!result.isError, `should succeed: ${JSON.stringify(result.content)}`);
+		assert.doesNotMatch(result.details.results[0]?.finalOutput ?? "", /full parallel chain output/);
+		assert.doesNotMatch(result.details.results[1]?.finalOutput ?? "", /full parallel chain output/);
+		const synthTaskArg = readCallArgs(2).at(-1) ?? "";
+		assert.match(synthTaskArg, /Output saved to:/);
+		assert.match(synthTaskArg, /2 lines/);
+		assert.doesNotMatch(synthTaskArg, /full parallel chain output/);
+	});
+
+	it("rejects chain parallel file-only output without spawning siblings", async () => {
+		const agents = [makeAgent("reviewer-a"), makeAgent("reviewer-b")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{
+					parallel: [
+						{ agent: "reviewer-a", task: "Review A", outputMode: "file-only" },
+						{ agent: "reviewer-b", task: "Review B", output: "b.md" },
+					],
+				}],
+				agents,
+				{ chainDir: tempDir },
+			),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /outputMode: "file-only"/);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
 	it("detaches parallel chain children cleanly on intercom handoff", async () => {
 		mockPi.onCall({
 			steps: [
@@ -531,9 +654,51 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 			),
 		);
 
-		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.equal(result.isError, undefined);
+		assert.match(result.content[0]?.text ?? "", /Chain detached for intercom coordination/);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /resume/);
 		assert.equal(detachEmitted, true);
 		assert.equal(result.details.results.some((entry) => entry.detached === true && entry.exitCode === 0), true);
+	});
+
+	it("stops a sequential chain when a child detaches for intercom coordination", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("after reply")] },
+			],
+		});
+		const agents = [
+			makeAgent("a", { systemPrompt: "Intercom orchestration channel:" }),
+			makeAgent("b"),
+		];
+		const intercomEvents = createEventBus();
+		let detachEmitted = false;
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "a", task: "Ask supervisor" },
+					{ agent: "b", task: "Must not run yet" },
+				],
+				agents,
+				{
+					intercomEvents,
+					onUpdate(update: { details?: { progress?: Array<{ currentTool?: string }> } }) {
+						if (detachEmitted) return;
+						if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
+						detachEmitted = true;
+						intercomEvents.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "chain-sequential-detach" });
+					},
+				},
+			),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.match(result.content[0]?.text ?? "", /Chain detached for intercom coordination/);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /resume/);
+		assert.equal(detachEmitted, true);
+		assert.equal(mockPi.callCount(), 1);
 	});
 
 	it("fails chain on parallel step failure", async () => {

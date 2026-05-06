@@ -12,7 +12,7 @@ process.env.HOME = importHome;
 process.env.USERPROFILE = importHome;
 let executorMod: any;
 try {
-	executorMod = await tryImport<any>("./subagent-executor.ts");
+	executorMod = await tryImport<any>("./src/runs/foreground/subagent-executor.ts");
 } finally {
 	if (originalHome === undefined) delete process.env.HOME;
 	else process.env.HOME = originalHome;

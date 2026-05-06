@@ -9,7 +9,7 @@ import {
 	resolveTopLevelParallelMaxTasks,
 	resolveChildMaxSubagentDepth,
 	resolveCurrentMaxSubagentDepth,
-} from "../../types.ts";
+} from "../../src/shared/types.ts";
 
 let savedDepth: string | undefined;
 let savedMaxDepth: string | undefined;

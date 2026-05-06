@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compactForegroundResult, extractToolArgsPreview } from "../../utils.ts";
-import { formatToolCall } from "../../formatters.ts";
+import { compactForegroundResult, extractToolArgsPreview } from "../../src/shared/utils.ts";
+import { formatToolCall } from "../../src/shared/formatters.ts";
 
 describe("foreground tool-call compaction", () => {
 	it("stores compact tool-call summaries instead of raw message payloads", () => {

@@ -12,7 +12,7 @@ import {
 	formatWorktreeDiffSummary,
 	resolveExpectedWorktreeAgentCwd,
 	type WorktreeSetup,
-} from "../../worktree.ts";
+} from "../../src/runs/shared/worktree.ts";
 
 function git(cwd: string, args: string[]): string {
 	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });

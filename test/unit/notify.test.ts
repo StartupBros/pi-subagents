@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
-import registerSubagentNotify from "../../notify.ts";
-import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../types.ts";
+import registerSubagentNotify from "../../src/runs/background/notify.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../src/shared/types.ts";
 
 function createPi() {
 	const events = new EventEmitter();

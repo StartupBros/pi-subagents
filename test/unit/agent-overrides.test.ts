@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { buildBuiltinOverrideConfig, discoverAgents, removeBuiltinAgentOverride } from "../../agents.ts";
+import { buildBuiltinOverrideConfig, discoverAgents, discoverAgentsAll, removeBuiltinAgentOverride } from "../../src/agents/agents.ts";
 
 let tempHome = "";
 let tempProject = "";
@@ -36,6 +36,17 @@ describe("builtin agent overrides", () => {
 		else process.env.USERPROFILE = originalUserProfile;
 		fs.rmSync(tempHome, { recursive: true, force: true });
 		fs.rmSync(tempProject, { recursive: true, force: true });
+	});
+
+	it("bundled builtin agents inherit the default model", () => {
+		const builtins = discoverAgentsAll(tempProject).builtin;
+		assert.ok(builtins.length > 0);
+		assert.deepEqual(
+			builtins
+				.filter((agent) => agent.model !== undefined || agent.fallbackModels !== undefined)
+				.map((agent) => agent.name),
+			[],
+		);
 	});
 
 	it("applies user settings overrides to builtin agents", () => {
@@ -199,6 +210,7 @@ describe("builtin agent overrides", () => {
 				systemPromptMode: "append",
 				inheritProjectContext: true,
 				inheritSkills: false,
+				defaultContext: "fork",
 				systemPrompt: "Base prompt",
 				skills: ["safe-bash"],
 				tools: ["bash"],
@@ -211,6 +223,7 @@ describe("builtin agent overrides", () => {
 				systemPromptMode: "replace",
 				inheritProjectContext: false,
 				inheritSkills: false,
+				defaultContext: undefined,
 				systemPrompt: "Base prompt",
 				skills: undefined,
 				tools: undefined,
@@ -224,6 +237,7 @@ describe("builtin agent overrides", () => {
 			thinking: false,
 			systemPromptMode: "replace",
 			inheritProjectContext: false,
+			defaultContext: false,
 			skills: false,
 			tools: false,
 		});

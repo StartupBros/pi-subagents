@@ -13,13 +13,16 @@ import * as path from "node:path";
 import { createTempDir, removeTempDir, tryImport } from "../support/helpers.ts";
 
 // Top-level await
-const settings = await tryImport<any>("./settings.ts");
-const skills = await tryImport<any>("./skills.ts");
+const settings = await tryImport<any>("./src/shared/settings.ts");
+const skills = await tryImport<any>("./src/agents/skills.ts");
 const available = !!(settings && skills);
 
 const resolveChainTemplates = settings?.resolveChainTemplates;
 const buildChainInstructions = settings?.buildChainInstructions;
 const resolveStepBehavior = settings?.resolveStepBehavior;
+const resolveParallelBehaviors = settings?.resolveParallelBehaviors;
+const suppressProgressForReadOnlyTask = settings?.suppressProgressForReadOnlyTask;
+const taskDisallowsFileUpdates = settings?.taskDisallowsFileUpdates;
 const isParallelStep = settings?.isParallelStep;
 const createChainDir = settings?.createChainDir;
 const normalizeSkillInput = skills?.normalizeSkillInput;
@@ -148,9 +151,23 @@ describe("resolveStepBehavior", { skip: !available ? "pi packages not available"
 		assert.equal(behavior.output, "custom.md");
 	});
 
+	it("defaults outputMode to inline unless a step overrides it", () => {
+		const inlineBehavior = resolveStepBehavior({ name: "test", output: "report.md" }, {});
+		assert.equal(inlineBehavior.outputMode, "inline");
+
+		const stepOverrideBehavior = resolveStepBehavior({ name: "test", output: "report.md" }, { outputMode: "file-only" });
+		assert.equal(stepOverrideBehavior.outputMode, "file-only");
+	});
+
 	it("false disables output", () => {
 		const config = { name: "test", output: "report.md" };
 		const behavior = resolveStepBehavior(config, { output: false });
+		assert.equal(behavior.output, false);
+	});
+
+	it("string false disables output defensively", () => {
+		const config = { name: "test", output: "report.md" };
+		const behavior = resolveStepBehavior(config, { output: "false" });
 		assert.equal(behavior.output, false);
 	});
 
@@ -163,9 +180,34 @@ describe("resolveStepBehavior", { skip: !available ? "pi packages not available"
 	});
 });
 
+describe("resolveParallelBehaviors", { skip: !available ? "pi packages not available" : undefined }, () => {
+	it("string false agent default disables output in chain parallel tasks", () => {
+		const behaviors = resolveParallelBehaviors(
+			[{ agent: "reviewer", task: "Review" }],
+			[{ name: "reviewer", output: "false" }],
+			0,
+		);
+
+		assert.equal(behaviors[0]?.output, false);
+	});
+});
+
+describe("read-only progress suppression", { skip: !available ? "pi packages not available" : undefined }, () => {
+	it("suppresses progress for review-only or no-edit tasks", () => {
+		const behavior = { reads: undefined, output: false, outputMode: "inline", progress: true, skills: undefined };
+
+		assert.equal(taskDisallowsFileUpdates("Review-only. Do not edit files."), true);
+		assert.equal(taskDisallowsFileUpdates("Implement read-only mode for config files."), false);
+		assert.equal(taskDisallowsFileUpdates("This task is not read-only; edit files."), false);
+		assert.equal(suppressProgressForReadOnlyTask(behavior, "Review-only. Do not edit files.").progress, false);
+		assert.equal(suppressProgressForReadOnlyTask(behavior, "{task}", "Review-only. Do not edit files.").progress, false);
+		assert.equal(suppressProgressForReadOnlyTask(behavior, "Implement the approved fix.").progress, true);
+	});
+});
+
 describe("buildChainInstructions", { skip: !available ? "pi packages not available" : undefined }, () => {
 	it("adds [Read from:] prefix for reads", () => {
-		const behavior = { reads: ["context.md"], output: false, progress: false, skills: undefined };
+		const behavior = { reads: ["context.md"], output: false, outputMode: "inline", progress: false, skills: undefined };
 		const dir = createTempDir("chain-test-");
 		try {
 			const { prefix } = buildChainInstructions(behavior, dir, false);
@@ -177,7 +219,7 @@ describe("buildChainInstructions", { skip: !available ? "pi packages not availab
 	});
 
 	it("adds [Write to:] prefix for output", () => {
-		const behavior = { reads: undefined, output: "output.md", progress: false, skills: undefined };
+		const behavior = { reads: undefined, output: "output.md", outputMode: "inline", progress: false, skills: undefined };
 		const dir = createTempDir("chain-test-");
 		try {
 			const { prefix } = buildChainInstructions(behavior, dir, false);
@@ -189,7 +231,7 @@ describe("buildChainInstructions", { skip: !available ? "pi packages not availab
 	});
 
 	it("adds progress instructions in suffix for first progress step", () => {
-		const behavior = { reads: undefined, output: false, progress: true, skills: undefined };
+		const behavior = { reads: undefined, output: false, outputMode: "inline", progress: true, skills: undefined };
 		const dir = createTempDir("chain-test-");
 		try {
 			const { suffix } = buildChainInstructions(behavior, dir, true);
@@ -207,7 +249,7 @@ describe("buildChainInstructions", { skip: !available ? "pi packages not availab
 	});
 
 	it("includes previous output in suffix when not in template", () => {
-		const behavior = { reads: undefined, output: false, progress: false, skills: undefined };
+		const behavior = { reads: undefined, output: false, outputMode: "inline", progress: false, skills: undefined };
 		const dir = createTempDir("chain-test-");
 		try {
 			const { suffix } = buildChainInstructions(behavior, dir, false, "Previous step output here");
@@ -221,7 +263,7 @@ describe("buildChainInstructions", { skip: !available ? "pi packages not availab
 	});
 
 	it("returns empty prefix/suffix when no behavior configured", () => {
-		const behavior = { reads: undefined, output: false, progress: false, skills: undefined };
+		const behavior = { reads: undefined, output: false, outputMode: "inline", progress: false, skills: undefined };
 		const dir = createTempDir("chain-test-");
 		try {
 			const { prefix, suffix } = buildChainInstructions(behavior, dir, false);

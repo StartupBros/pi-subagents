@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { visibleWidth } from "@mariozechner/pi-tui";
-import { row } from "../../render-helpers.ts";
+import { row } from "../../src/tui/render-helpers.ts";
 
 const theme = {
 	fg(_name: string, text: string): string {

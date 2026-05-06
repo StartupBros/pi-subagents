@@ -9,7 +9,7 @@ import {
 	PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT,
 	registerPromptTemplateDelegationBridge,
 	type PromptTemplateBridgeEvents,
-} from "../../prompt-template-bridge.ts";
+} from "../../src/slash/prompt-template-bridge.ts";
 
 class FakeEvents implements PromptTemplateBridgeEvents {
 	private handlers = new Map<string, Array<(data: unknown) => void>>();
@@ -55,9 +55,9 @@ describe("prompt-template delegation bridge", () => {
 							index: 0,
 							agent: "worker",
 							currentTool: "read",
-							currentToolArgs: "index.ts",
+							currentToolArgs: "src/extension/index.ts",
 							recentOutput: ["line 1"],
-							recentTools: [{ tool: "read", args: '{"path":"index.ts"}' }],
+							recentTools: [{ tool: "read", args: '{"path":"src/extension/index.ts"}' }],
 							toolCount: 1,
 							durationMs: 10,
 							tokens: 42,
@@ -101,7 +101,7 @@ describe("prompt-template delegation bridge", () => {
 		assert.equal(update.currentTool, "read");
 		assert.equal(update.toolCount, 1);
 		assert.deepEqual(update.recentOutputLines, ["line 1"]);
-		assert.deepEqual(update.recentTools, [{ tool: "read", args: '{"path":"index.ts"}' }]);
+		assert.deepEqual(update.recentTools, [{ tool: "read", args: '{"path":"src/extension/index.ts"}' }]);
 		assert.equal(update.model, "openai/gpt-5-mini");
 		assert.equal(update.taskProgress?.[0]?.model, "openai/gpt-5-mini");
 

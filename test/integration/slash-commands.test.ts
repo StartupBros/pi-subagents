@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, it } from "node:test";
 
+import { ASYNC_DIR } from "../../src/shared/types.ts";
+
 const SLASH_RESULT_TYPE = "subagent-slash-result";
 const SLASH_SUBAGENT_REQUEST_EVENT = "subagent:slash:request";
 const SLASH_SUBAGENT_STARTED_EVENT = "subagent:slash:started";
@@ -43,9 +45,9 @@ interface RegisterSlashCommandsModule {
 }
 
 interface SlashLiveStateModule {
-	clearSlashSnapshots?: typeof import("../../slash-live-state.ts").clearSlashSnapshots;
-	getSlashRenderableSnapshot?: typeof import("../../slash-live-state.ts").getSlashRenderableSnapshot;
-	resolveSlashMessageDetails?: typeof import("../../slash-live-state.ts").resolveSlashMessageDetails;
+	clearSlashSnapshots?: typeof import("../../src/slash/slash-live-state.ts").clearSlashSnapshots;
+	getSlashRenderableSnapshot?: typeof import("../../src/slash/slash-live-state.ts").getSlashRenderableSnapshot;
+	resolveSlashMessageDetails?: typeof import("../../src/slash/slash-live-state.ts").resolveSlashMessageDetails;
 }
 
 let registerSlashCommands: RegisterSlashCommandsModule["registerSlashCommands"];
@@ -54,8 +56,8 @@ let getSlashRenderableSnapshot: SlashLiveStateModule["getSlashRenderableSnapshot
 let resolveSlashMessageDetails: SlashLiveStateModule["resolveSlashMessageDetails"];
 let available = true;
 try {
-	({ registerSlashCommands } = await import("../../slash-commands.ts") as RegisterSlashCommandsModule);
-	({ clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails } = await import("../../slash-live-state.ts") as SlashLiveStateModule);
+	({ registerSlashCommands } = await import("../../src/slash/slash-commands.ts") as RegisterSlashCommandsModule);
+	({ clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails } = await import("../../src/slash/slash-live-state.ts") as SlashLiveStateModule);
 } catch {
 	available = false;
 }
@@ -115,39 +117,6 @@ async function withIsolatedHome<T>(fn: () => Promise<T>): Promise<T> {
 	}
 }
 
-async function captureAgentManagerParams(result: unknown): Promise<unknown> {
-	return withIsolatedHome(async () => {
-		const commands = new Map<string, { handler(args: string, ctx: unknown): Promise<void> }>();
-		const events = createEventBus();
-		let requestedParams: unknown;
-		events.on(SLASH_SUBAGENT_REQUEST_EVENT, (data) => {
-			const payload = data as { requestId: string; params?: unknown };
-			requestedParams = payload.params;
-			events.emit(SLASH_SUBAGENT_STARTED_EVENT, { requestId: payload.requestId });
-			events.emit(SLASH_SUBAGENT_RESPONSE_EVENT, {
-				requestId: payload.requestId,
-				result: {
-					content: [{ type: "text", text: "manager finished" }],
-					details: { mode: "single", results: [] },
-				},
-				isError: false,
-			});
-		});
-
-		const pi = {
-			events,
-			registerCommand(name: string, spec: { handler(args: string, ctx: unknown): Promise<void> }) {
-				commands.set(name, spec);
-			},
-			registerShortcut() {},
-			sendMessage(_message: unknown) {},
-		};
-
-		registerSlashCommands!(pi, createState(process.cwd()));
-		await commands.get("agents")!.handler("", createCommandContext({ custom: async () => result }));
-		return requestedParams;
-	});
-}
 
 function createCommandContext(
 	overrides: Partial<{
@@ -156,6 +125,7 @@ function createCommandContext(
 		custom: (...args: unknown[]) => Promise<unknown>;
 		notify: (message: string, type?: string) => void;
 		setStatus: (key: string, text: string | undefined) => void;
+		setToolsExpanded: (expanded: boolean) => void;
 		sessionManager: unknown;
 	}> = {},
 ) {
@@ -165,17 +135,22 @@ function createCommandContext(
 		ui: {
 			notify: overrides.notify ?? ((_message: string) => {}),
 			setStatus: overrides.setStatus ?? ((_key: string, _text: string | undefined) => {}),
+			setToolsExpanded: overrides.setToolsExpanded ?? ((_expanded: boolean) => {}),
 			onTerminalInput: () => () => {},
 			custom: overrides.custom ?? (async () => undefined),
 		},
 		modelRegistry: { getAvailable: () => [] },
-		sessionManager: overrides.sessionManager,
+		sessionManager: overrides.sessionManager ?? {
+			getSessionFile: () => null,
+			getSessionId: () => "session-test",
+		},
 	};
 }
 
 async function withTempProject<T>(prefix: string, fn: (root: string) => Promise<T>): Promise<T> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	fs.mkdirSync(path.join(root, ".pi", "agents"), { recursive: true });
+	fs.mkdirSync(path.join(root, ".pi", "chains"), { recursive: true });
 	try {
 		return await fn(root);
 	} finally {
@@ -184,7 +159,7 @@ async function withTempProject<T>(prefix: string, fn: (root: string) => Promise<
 }
 
 function writeProjectChain(root: string, fileName: string, content: string): void {
-	fs.writeFileSync(path.join(root, ".pi", "agents", fileName), content, "utf-8");
+	fs.writeFileSync(path.join(root, ".pi", "chains", fileName), content, "utf-8");
 }
 
 async function captureSlashCommandParams(
@@ -343,6 +318,40 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		assert.equal((visibleSnapshot.result.content[0] as { text?: string }).text, "Scout finished");
 	});
 
+	it("/run collapses tool detail before showing the initial live card", async () => {
+		const log: string[] = [];
+		const commands = new Map<string, { handler(args: string, ctx: unknown): Promise<void> }>();
+		const events = createEventBus();
+		events.on(SLASH_SUBAGENT_REQUEST_EVENT, (data) => {
+			const requestId = (data as { requestId: string }).requestId;
+			events.emit(SLASH_SUBAGENT_STARTED_EVENT, { requestId });
+			events.emit(SLASH_SUBAGENT_RESPONSE_EVENT, {
+				requestId,
+				result: { content: [{ type: "text", text: "done" }], details: { mode: "single", results: [] } },
+				isError: false,
+			});
+		});
+
+		const pi = {
+			events,
+			registerCommand(name: string, spec: { handler(args: string, ctx: unknown): Promise<void> }) {
+				commands.set(name, spec);
+			},
+			registerShortcut() {},
+			sendMessage() {
+				log.push("send");
+			},
+		};
+
+		registerSlashCommands!(pi, createState(process.cwd()));
+		await commands.get("run")!.handler("scout inspect this", createCommandContext({
+			hasUI: true,
+			setToolsExpanded: (expanded) => log.push(`expanded:${String(expanded)}`),
+		}));
+
+		assert.deepEqual(log.slice(0, 2), ["expanded:false", "send"]);
+	});
+
 	it("/run finalizes the slash snapshot before the last UI redraw on error", async () => {
 		const sent: unknown[] = [];
 		const log: string[] = [];
@@ -397,7 +406,7 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		assert.equal((visibleSnapshot.result.content[0] as { text?: string }).text, "Subagent failed");
 	});
 
-	it("/parallel forwards inline output, reads, and progress config", async () => {
+	it("/parallel forwards inline output behavior config", async () => {
 		const commands = new Map<string, { handler(args: string, ctx: unknown): Promise<void> }>();
 		const events = createEventBus();
 		let requestedParams: unknown;
@@ -425,10 +434,10 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		};
 
 		registerSlashCommands!(pi, createState(process.cwd()));
-		await commands.get("parallel")!.handler("scout[output=x.md,reads=a.md+b.md,progress] -- Review", createCommandContext());
+		await commands.get("parallel")!.handler("scout[output=x.md,outputMode=file-only,reads=a.md+b.md,progress] -- Review", createCommandContext());
 
 		assert.deepEqual(requestedParams, {
-			tasks: [{ agent: "scout", task: "Review", output: "x.md", reads: ["a.md", "b.md"], progress: true }],
+			tasks: [{ agent: "scout", task: "Review", output: "x.md", outputMode: "file-only", reads: ["a.md", "b.md"], progress: true }],
 			clarify: false,
 			agentScope: "both",
 		});
@@ -479,6 +488,51 @@ describe("saved chain slash command", { skip: !available ? "slash-commands.ts no
 		clearSlashSnapshots?.();
 	});
 
+	it("/run and /chain accept dotted packaged runtime agent names", async () => {
+		await withTempProject("pi-packaged-agent-slash-", async (root) => {
+			fs.writeFileSync(path.join(root, ".pi", "agents", "code-analysis.scout.md"), `---
+name: scout
+package: code-analysis
+description: Fast recon
+---
+
+Inspect
+`, "utf-8");
+			fs.writeFileSync(path.join(root, ".pi", "agents", "documentation.writer.md"), `---
+name: writer
+package: documentation
+description: Writer
+---
+
+Write
+`, "utf-8");
+
+			const run = await captureSlashCommandParams("run", "code-analysis.scout Investigate", root);
+			assert.deepEqual(run.params, { agent: "code-analysis.scout", task: "Investigate", clarify: false, agentScope: "both" });
+
+			const chain = await captureSlashCommandParams("chain", "code-analysis.scout \"Scan\" -> documentation.writer", root);
+			assert.deepEqual((chain.params as { chain?: Array<{ agent?: string; task?: string }> }).chain?.map(({ agent, task }) => ({ agent, task })), [
+				{ agent: "code-analysis.scout", task: "Scan" },
+				{ agent: "documentation.writer", task: undefined },
+			]);
+
+			await withIsolatedHome(async () => {
+				const commands = new Map<string, RegisteredSlashCommand>();
+				const pi = {
+					events: createEventBus(),
+					registerCommand(name: string, spec: RegisteredSlashCommand) { commands.set(name, spec); },
+					registerShortcut() {},
+					sendMessage(_message: unknown) {},
+				};
+				registerSlashCommands!(pi, createState(root));
+				const runCompletions = commands.get("run")!.getArgumentCompletions!("code-") as Array<{ value: string; label: string }>;
+				assert.deepEqual(runCompletions.map((completion) => completion.value), ["code-analysis.scout"]);
+				const chainCompletions = commands.get("chain")!.getArgumentCompletions!("code-analysis.scout \"Scan\" -> doc") as Array<{ value: string; label: string }>;
+				assert.deepEqual(chainCompletions.map((completion) => completion.value), ["code-analysis.scout \"Scan\" -> documentation.writer"]);
+			});
+		});
+	});
+
 	it("/run-chain launches a saved chain with a shared task", async () => {
 		await withTempProject("pi-run-chain-success-", async (root) => {
 			writeProjectChain(root, "review-flow.chain.md", `---
@@ -514,6 +568,40 @@ Review {previous}
 			assert.equal(runParams.agentScope, "both");
 			assert.equal(runParams.async, undefined);
 			assert.equal(runParams.context, undefined);
+		});
+	});
+
+	it("/run-chain launches and completes packaged saved chains by dotted runtime name", async () => {
+		await withTempProject("pi-run-chain-packaged-", async (root) => {
+			writeProjectChain(root, "code-analysis.review-flow.chain.md", `---
+name: review-flow
+package: code-analysis
+description: Review flow
+---
+
+## code-analysis.scout
+
+Scan {task}
+`);
+
+			const { params } = await captureSlashCommandParams("run-chain", "code-analysis.review-flow -- Audit", root);
+			assert.equal((params as { task?: string }).task, "Audit");
+			assert.deepEqual((params as { chain?: Array<{ agent?: string; task?: string }> }).chain?.map(({ agent, task }) => ({ agent, task })), [
+				{ agent: "code-analysis.scout", task: "Scan {task}" },
+			]);
+
+			await withIsolatedHome(async () => {
+				const commands = new Map<string, RegisteredSlashCommand>();
+				const pi = {
+					events: createEventBus(),
+					registerCommand(name: string, spec: RegisteredSlashCommand) { commands.set(name, spec); },
+					registerShortcut() {},
+					sendMessage(_message: unknown) {},
+				};
+				registerSlashCommands!(pi, createState(root));
+				const completions = commands.get("run-chain")!.getArgumentCompletions!("code-") as Array<{ value: string; label: string }>;
+				assert.deepEqual(completions.map((completion) => completion.value), ["code-analysis.review-flow"]);
+			});
 		});
 	});
 
@@ -627,9 +715,9 @@ Project chain task
 `);
 
 			const { params } = await captureSlashCommandParams("run-chain", "review-flow -- Shared task", root, () => {
-				const userAgentsDir = path.join(os.homedir(), ".agents");
-				fs.mkdirSync(userAgentsDir, { recursive: true });
-				fs.writeFileSync(path.join(userAgentsDir, "review-flow.chain.md"), `---
+				const userChainsDir = path.join(os.homedir(), ".pi", "agent", "chains");
+				fs.mkdirSync(userChainsDir, { recursive: true });
+				fs.writeFileSync(path.join(userChainsDir, "review-flow.chain.md"), `---
 name: review-flow
 description: User review flow
 ---
@@ -653,6 +741,7 @@ description: Field flow
 
 ## scout
 output: context.md
+outputMode: file-only
 reads: input.md, notes.md
 model: openai/gpt-5.5
 skills: research, audit
@@ -667,6 +756,7 @@ Gather context
 				agent: "scout",
 				task: "Gather context",
 				output: "context.md",
+				outputMode: "file-only",
 				reads: ["input.md", "notes.md"],
 				progress: true,
 				skill: ["research", "audit"],
@@ -676,108 +766,6 @@ Gather context
 	});
 });
 
-describe("agent manager slash routing", { skip: !available ? "slash-commands.ts not importable" : undefined }, () => {
-	beforeEach(() => {
-		clearSlashSnapshots?.();
-	});
-
-	it("maps fork and background manager toggles to context and async without clarify", async () => {
-		const params = await captureAgentManagerParams({
-			action: "launch",
-			agent: "scout",
-			task: "Investigate",
-			skipClarify: false,
-			fork: true,
-			background: true,
-		});
-
-		assert.deepEqual(params, {
-			agent: "scout",
-			task: "Investigate",
-			clarify: false,
-			agentScope: "both",
-			context: "fork",
-			async: true,
-		});
-	});
-
-	it("keeps clarify enabled for foreground non-quick manager launches", async () => {
-		const params = await captureAgentManagerParams({
-			action: "launch",
-			agent: "scout",
-			task: "Investigate",
-			skipClarify: false,
-		});
-
-		assert.deepEqual(params, {
-			agent: "scout",
-			task: "Investigate",
-			clarify: true,
-			agentScope: "both",
-		});
-	});
-
-	it("maps worktree to top-level parallel manager launches", async () => {
-		const params = await captureAgentManagerParams({
-			action: "parallel",
-			tasks: [
-				{ agent: "scout", task: "Review A" },
-				{ agent: "reviewer", task: "Review B" },
-			],
-			skipClarify: true,
-			fork: true,
-			background: true,
-			worktree: true,
-		});
-
-		assert.deepEqual(params, {
-			tasks: [
-				{ agent: "scout", task: "Review A" },
-				{ agent: "reviewer", task: "Review B" },
-			],
-			clarify: false,
-			agentScope: "both",
-			context: "fork",
-			async: true,
-			worktree: true,
-		});
-	});
-
-	it("sets worktree only on existing saved-chain parallel steps", async () => {
-		const params = await captureAgentManagerParams({
-			action: "launch-chain",
-			chain: {
-				name: "mixed",
-				description: "Mixed chain",
-				source: "user",
-				filePath: "/tmp/mixed.chain.md",
-				steps: [
-					{ agent: "scout", task: "Scout" },
-					{ parallel: [{ agent: "reviewer", task: "Review" }, { agent: "worker", task: "Build" }] },
-				],
-			},
-			task: "Shared",
-			skipClarify: true,
-			worktree: true,
-		});
-
-		assert.ok(params && typeof params === "object");
-		const routed = params as { chain?: unknown; task?: unknown; clarify?: unknown; agentScope?: unknown };
-		assert.equal(routed.task, "Shared");
-		assert.equal(routed.clarify, false);
-		assert.equal(routed.agentScope, "both");
-		assert.ok(Array.isArray(routed.chain));
-		const [sequentialStep, parallelStep] = routed.chain;
-		assert.ok(sequentialStep && typeof sequentialStep === "object");
-		assert.equal((sequentialStep as { agent?: unknown }).agent, "scout");
-		assert.equal((sequentialStep as { task?: unknown }).task, "Scout");
-		assert.equal("worktree" in sequentialStep, false);
-		assert.deepEqual(parallelStep, {
-			parallel: [{ agent: "reviewer", task: "Review" }, { agent: "worker", task: "Build" }],
-			worktree: true,
-		});
-	});
-});
 
 describe("subagents-doctor slash command", { skip: !available ? "slash-commands.ts not importable" : undefined }, () => {
 	beforeEach(() => {
@@ -788,37 +776,22 @@ describe("subagents-doctor slash command", { skip: !available ? "slash-commands.
 		const { params } = await captureSlashCommandParams("subagents-doctor", "", process.cwd());
 		assert.deepEqual(params, { action: "doctor" });
 	});
-});
 
-describe("subagents-status slash command", { skip: !available ? "slash-commands.ts not importable" : undefined }, () => {
-	beforeEach(() => {
-		clearSlashSnapshots?.();
+	it("does not register the removed subagents-status overlay command", async () => {
+		await withIsolatedHome(async () => {
+			const commands = new Map<string, RegisteredSlashCommand>();
+			const pi = {
+				events: createEventBus(),
+				registerCommand(name: string, spec: RegisteredSlashCommand) {
+					commands.set(name, spec);
+				},
+				registerShortcut() {},
+				sendMessage(_message: unknown) {},
+			};
+
+			registerSlashCommands!(pi, createState(process.cwd()));
+			assert.equal(commands.has("subagents-status"), false);
+		});
 	});
 
-	it("opens the async status overlay", async () => {
-		const commands = new Map<string, { handler(args: string, ctx: unknown): Promise<void> }>();
-		const events = createEventBus();
-		let customCalls = 0;
-		const pi = {
-			events,
-			registerCommand(name: string, spec: { handler(args: string, ctx: unknown): Promise<void> }) {
-				commands.set(name, spec);
-			},
-			registerShortcut() {},
-			sendMessage(_message: unknown) {},
-		};
-
-		registerSlashCommands!(pi, createState(process.cwd()));
-		assert.ok(commands.has("subagents-status"));
-
-		await commands.get("subagents-status")!.handler("", createCommandContext({
-			hasUI: true,
-			custom: async () => {
-				customCalls++;
-				return undefined;
-			},
-		}));
-
-		assert.equal(customCalls, 1);
-	});
 });

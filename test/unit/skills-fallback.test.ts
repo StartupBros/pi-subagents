@@ -9,7 +9,7 @@ import {
 	discoverAvailableSkills,
 	resolveSkills,
 	resolveSkillsWithFallback,
-} from "../../skills.ts";
+} from "../../src/agents/skills.ts";
 
 let tempDir = "";
 
@@ -41,9 +41,9 @@ function makePackageSkill(packageRoot: string, name: string, body: string, packa
 
 async function importSkillsFresh() {
 	const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-	const modulePath = path.resolve(projectRoot, "skills.ts");
+	const modulePath = path.resolve(projectRoot, "src/agents/skills.ts");
 	const bust = `${Date.now()}-${Math.random()}`;
-	return await import(`${pathToFileURL(modulePath).href}?bust=${bust}`) as typeof import("../../skills.ts");
+	return await import(`${pathToFileURL(modulePath).href}?bust=${bust}`) as typeof import("../../src/agents/skills.ts");
 }
 
 describe("skills filesystem fallback", () => {
@@ -76,6 +76,19 @@ describe("skills filesystem fallback", () => {
 		assert.equal(resolved[0]?.name, "resolve-skill");
 		assert.equal(resolved[0]?.source, "project");
 		assert.match(resolved[0]?.content ?? "", /Run local fallback checks\./);
+	});
+
+	it("does not expose pi-subagents as a child-injectable skill", () => {
+		makeProjectSkill(tempDir, "pi-subagents", "Parent orchestration only.");
+		makeProjectSkill(tempDir, "safe-bash", "Use safe bash.");
+
+		const available = discoverAvailableSkills(tempDir).map((skill) => skill.name);
+		assert.equal(available.includes("pi-subagents"), false);
+		assert.equal(available.includes("safe-bash"), true);
+
+		const { resolved, missing } = resolveSkills(["pi-subagents", "safe-bash"], tempDir);
+		assert.deepEqual(missing, ["pi-subagents"]);
+		assert.deepEqual(resolved.map((skill) => skill.name), ["safe-bash"]);
 	});
 
 	it("classifies package-provided skills as project-package", () => {

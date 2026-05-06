@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 interface SlashLiveStateModule {
-	applySlashUpdate?: typeof import("../../slash-live-state.ts").applySlashUpdate;
-	buildSlashInitialResult?: typeof import("../../slash-live-state.ts").buildSlashInitialResult;
-	clearSlashSnapshots?: typeof import("../../slash-live-state.ts").clearSlashSnapshots;
-	finalizeSlashResult?: typeof import("../../slash-live-state.ts").finalizeSlashResult;
-	getSlashRenderableSnapshot?: typeof import("../../slash-live-state.ts").getSlashRenderableSnapshot;
-	restoreSlashFinalSnapshots?: typeof import("../../slash-live-state.ts").restoreSlashFinalSnapshots;
+	applySlashUpdate?: typeof import("../../src/slash/slash-live-state.ts").applySlashUpdate;
+	buildSlashInitialResult?: typeof import("../../src/slash/slash-live-state.ts").buildSlashInitialResult;
+	clearSlashSnapshots?: typeof import("../../src/slash/slash-live-state.ts").clearSlashSnapshots;
+	finalizeSlashResult?: typeof import("../../src/slash/slash-live-state.ts").finalizeSlashResult;
+	getSlashRenderableSnapshot?: typeof import("../../src/slash/slash-live-state.ts").getSlashRenderableSnapshot;
+	restoreSlashFinalSnapshots?: typeof import("../../src/slash/slash-live-state.ts").restoreSlashFinalSnapshots;
 }
 
 let applySlashUpdate: SlashLiveStateModule["applySlashUpdate"];
@@ -25,7 +25,7 @@ try {
 		finalizeSlashResult,
 		getSlashRenderableSnapshot,
 		restoreSlashFinalSnapshots,
-	} = await import("../../slash-live-state.ts") as SlashLiveStateModule);
+	} = await import("../../src/slash/slash-live-state.ts") as SlashLiveStateModule);
 } catch {
 	available = false;
 }

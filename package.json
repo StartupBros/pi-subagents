@@ -1,6 +1,6 @@
 {
   "name": "pi-subagents",
-  "version": "0.20.1",
+  "version": "0.24.0",
   "description": "Pi extension for delegating tasks to subagents with chains, parallel execution, and TUI clarification",
   "author": "Nico Bailon",
   "license": "MIT",
@@ -26,8 +26,7 @@
     "pi-subagents": "install.mjs"
   },
   "files": [
-    "*.ts",
-    "!*.test.ts",
+    "src/**/*.ts",
     "*.mjs",
     "agents/",
     "skills/**/*",
@@ -43,7 +42,7 @@
   },
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./src/extension/index.ts"
     ],
     "skills": [
       "./skills"
@@ -58,12 +57,27 @@
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*"
   },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-agent-core": {
+      "optional": true
+    },
+    "@mariozechner/pi-ai": {
+      "optional": true
+    },
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    },
+    "@mariozechner/pi-tui": {
+      "optional": true
+    }
+  },
   "dependencies": {
     "typebox": "^1.1.24"
   },
   "devDependencies": {
     "@mariozechner/pi-agent-core": "^0.65.0",
     "@mariozechner/pi-ai": "^0.65.0",
-    "@mariozechner/pi-coding-agent": "^0.65.0"
+    "@mariozechner/pi-coding-agent": "^0.65.0",
+    "@mariozechner/pi-tui": "^0.65.2"
   }
 }

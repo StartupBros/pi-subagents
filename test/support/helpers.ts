@@ -85,7 +85,7 @@ export function makeAgent(name: string, overrides: Partial<AgentConfig> = {}): A
 	};
 }
 
-export interface MinimalCtx {
+interface MinimalCtx {
 	cwd: string;
 	hasUI: boolean;
 	ui: Record<string, never>;
@@ -117,7 +117,7 @@ export function makeMinimalCtx(cwd: string): MinimalCtx {
 /**
  * Try to dynamically import a module.
  * - Bare specifiers are imported as-is.
- * - Relative paths (e.g., "./utils.ts") are resolved from the project root.
+ * - Relative paths (e.g., "./src/shared/utils.ts") are resolved from the project root.
  *
  * Only swallows MODULE_NOT_FOUND / ERR_MODULE_NOT_FOUND when the missing module
  * is exactly the requested bare specifier (expected optional dependency).

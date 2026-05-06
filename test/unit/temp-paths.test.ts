@@ -9,7 +9,7 @@ import {
 	TEMP_ROOT_DIR,
 	getAsyncConfigPath,
 	resolveTempScopeId,
-} from "../../types.ts";
+} from "../../src/shared/types.ts";
 
 describe("resolveTempScopeId", () => {
 	it("prefers uid when available", () => {

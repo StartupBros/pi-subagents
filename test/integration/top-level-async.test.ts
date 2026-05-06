@@ -10,7 +10,7 @@ interface TopLevelAsyncModule {
 	): T;
 }
 
-const mod = await tryImport<TopLevelAsyncModule>("./top-level-async.ts");
+const mod = await tryImport<TopLevelAsyncModule>("./src/runs/background/top-level-async.ts");
 const available = !!mod;
 
 describe("force top-level async helper", { skip: !available ? "pi packages not available" : undefined }, () => {
