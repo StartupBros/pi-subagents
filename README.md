@@ -826,6 +826,16 @@ Session directory precedence is: `params.sessionDir`, then `config.defaultSessio
 
 Controls nested delegation when no inherited `PI_SUBAGENT_MAX_DEPTH` is already in effect. Per-agent `maxSubagentDepth` can tighten the limit for that agent’s child runs, but cannot relax an inherited stricter limit.
 
+### `defaultChildExtensions`
+
+```json
+{ "defaultChildExtensions": [] }
+```
+
+Sets the default extension sandbox for child Pi processes when an agent does not declare its own `extensions` field. Omit it or set `"inherit"` to load normal Pi extensions. Use `[]` or `"none"` to load only the subagent runtime extension, which is the safest setting for headless JSON child runs on extension-heavy Pi setups. You can also provide an array of extension paths to allowlist specific child-safe extensions.
+
+Agent frontmatter `extensions` still takes precedence over this default.
+
 ### `intercomBridge`
 
 ```json

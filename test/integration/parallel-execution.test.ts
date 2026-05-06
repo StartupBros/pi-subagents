@@ -112,11 +112,11 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		removeTempDir(tempDir);
 	});
 
-	function makeExecutor(agents = [makeAgent("echo")]) {
+	function makeExecutor(agents = [makeAgent("echo")], config = {}) {
 		return createSubagentExecutor({
 			pi: { events: createEventBus(), getSessionName: () => undefined },
 			state: { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
-			config: {},
+			config,
 			asyncByDefault: false,
 			tempArtifactsDir: tempDir,
 			getSubagentSessionRoot: () => tempDir,
@@ -169,6 +169,26 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(results[1].agent, "b");
 		const ok = results.filter((r: any) => r.exitCode === 0).length;
 		assert.equal(ok, 2);
+	});
+
+	it("applies default child extension sandbox when an agent leaves extensions unspecified", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Done" });
+		const executor = makeExecutor([makeAgent("echo")], { defaultChildExtensions: [] });
+
+		const result = await executor.execute(
+			"default-child-extensions",
+			{ agent: "echo", task: "Use extension sandbox" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		const args = readLastCallArgs();
+		assert.ok(args.includes("--no-extensions"));
+		const extensionArgs = args.filter((arg, index) => args[index - 1] === "--extension");
+		assert.ok(extensionArgs.some((arg) => arg.endsWith("subagent-prompt-runtime.ts")));
+		assert.equal(extensionArgs.length, 1);
 	});
 
 	it("top-level parallel output saves use per-task output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

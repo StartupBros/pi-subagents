@@ -401,6 +401,13 @@ export interface ExtensionConfig {
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
 	intercomBridge?: IntercomBridgeConfig;
+	/**
+	 * Default extension sandbox for child Pi processes when an agent does not
+	 * declare its own `extensions` field. Omit/"inherit" to load normal Pi
+	 * extensions, []/"none" to load only the subagent runtime extension, or list
+	 * extension paths to allowlist.
+	 */
+	defaultChildExtensions?: string[] | "inherit" | "none";
 }
 
 // ============================================================================

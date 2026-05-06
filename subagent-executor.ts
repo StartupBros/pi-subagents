@@ -127,6 +127,23 @@ interface ExecutorDeps {
 	discoverAgents: (cwd: string, scope: AgentScope) => { agents: AgentConfig[] };
 }
 
+function resolveDefaultChildExtensions(config: ExtensionConfig): string[] | undefined {
+	const value = config.defaultChildExtensions;
+	if (value === undefined || value === "inherit") return undefined;
+	if (value === "none") return [];
+	if (!Array.isArray(value)) return undefined;
+	return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function applyDefaultChildExtensions(agents: AgentConfig[], config: ExtensionConfig): AgentConfig[] {
+	const defaultExtensions = resolveDefaultChildExtensions(config);
+	if (defaultExtensions === undefined) return agents;
+	return agents.map((agent) => {
+		if (agent.extensions !== undefined) return agent;
+		return { ...agent, extensions: [...defaultExtensions] };
+	});
+}
+
 interface ExecutionContextData {
 	params: SubagentParamsLike;
 	effectiveCwd: string;
@@ -1747,7 +1764,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		const effectiveCwd = effectiveParams.cwd ?? ctx.cwd;
 		const parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
 		deps.state.currentSessionId = parentSessionFile ?? `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-		const discoveredAgents = deps.discoverAgents(effectiveCwd, scope).agents;
+		const discoveredAgents = applyDefaultChildExtensions(deps.discoverAgents(effectiveCwd, scope).agents, deps.config);
 		const sessionName = resolveIntercomSessionTarget(deps.pi.getSessionName(), ctx.sessionManager.getSessionId());
 		const intercomBridge = resolveIntercomBridge({
 			config: deps.config.intercomBridge,
