@@ -35,9 +35,9 @@ import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import registerSubagentNotify, { type SubagentNotifyDetails } from "../runs/background/notify.ts";
 import { SUBAGENT_CHILD_ENV } from "../runs/shared/pi-args.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
+import { loadConfig } from "./config.ts";
 import {
 	type Details,
-	type ExtensionConfig,
 	type SubagentState,
 	ASYNC_DIR,
 	DEFAULT_ARTIFACT_CONFIG,
@@ -56,6 +56,8 @@ import {
 	type SubagentControlMessageDetails,
 } from "./control-notices.ts";
 
+export { loadConfig } from "./config.ts";
+
 /**
  * Derive subagent session base directory from parent session file.
  * If parent session is ~/.pi/agent/sessions/abc123.jsonl,
@@ -70,18 +72,6 @@ function getSubagentSessionRoot(parentSessionFile: string | null): string {
 		return path.join(sessionsDir, baseName);
 	}
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"));
-}
-
-function loadConfig(): ExtensionConfig {
-	const configPath = path.join(os.homedir(), ".pi", "agent", "extensions", "subagent", "config.json");
-	try {
-		if (fs.existsSync(configPath)) {
-			return JSON.parse(fs.readFileSync(configPath, "utf-8")) as ExtensionConfig;
-		}
-	} catch (error) {
-		console.error(`Failed to load subagent config from '${configPath}':`, error);
-	}
-	return {};
 }
 
 function expandTilde(p: string): string {
