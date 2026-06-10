@@ -12,7 +12,12 @@ export function getArtifactsDir(sessionFile: string | null): string {
 	return TEMP_ARTIFACTS_DIR;
 }
 
-export function getArtifactPaths(artifactsDir: string, runId: string, agent: string, index?: number): ArtifactPaths {
+export function getArtifactPaths(
+	artifactsDir: string,
+	runId: string,
+	agent: string,
+	index?: number,
+): ArtifactPaths {
 	const suffix = index !== undefined ? `_${index}` : "";
 	const safeAgent = agent.replace(/[^\w.-]/g, "_");
 	const base = `${runId}_${safeAgent}${suffix}`;
@@ -36,8 +41,58 @@ export function writeMetadata(filePath: string, metadata: object): void {
 	fs.writeFileSync(filePath, JSON.stringify(metadata, null, 2), "utf-8");
 }
 
-export function appendJsonl(filePath: string, line: string): void {
-	fs.appendFileSync(filePath, `${line}\n`);
+export interface AppendJsonlOptions {
+	maxBytes?: number;
+	truncationLine?: string;
+	truncationMarkerPath?: string;
+}
+
+function appendJsonlTruncationMarker(
+	filePath: string,
+	options: Required<Pick<AppendJsonlOptions, "maxBytes">> & AppendJsonlOptions,
+): void {
+	const markerPath = options.truncationMarkerPath ?? `${filePath}.truncated`;
+	if (fs.existsSync(markerPath)) return;
+
+	const markerLine =
+		options.truncationLine ??
+		JSON.stringify({
+			type: "jsonl.truncated",
+			ts: Date.now(),
+			maxBytes: options.maxBytes,
+		});
+	fs.appendFileSync(filePath, `${markerLine}\n`);
+	fs.writeFileSync(markerPath, `${markerLine}\n`, "utf-8");
+}
+
+export function appendJsonl(
+	filePath: string,
+	line: string,
+	options: AppendJsonlOptions = {},
+): void {
+	if (options.maxBytes === undefined) {
+		fs.appendFileSync(filePath, `${line}\n`);
+		return;
+	}
+
+	const chunk = `${line}\n`;
+	const chunkBytes = Buffer.byteLength(chunk, "utf-8");
+	let currentBytes = 0;
+	try {
+		currentBytes = fs.statSync(filePath).size;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+
+	if (currentBytes + chunkBytes <= options.maxBytes) {
+		fs.appendFileSync(filePath, chunk);
+		return;
+	}
+
+	appendJsonlTruncationMarker(filePath, {
+		...options,
+		maxBytes: options.maxBytes,
+	});
 }
 
 export function cleanupOldArtifacts(dir: string, maxAgeDays: number): void {

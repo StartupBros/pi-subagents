@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { createJsonlWriter, type DrainableSource, type JsonlWriteStream } from "../../src/shared/jsonl-writer.ts";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, it } from "node:test";
+import { appendJsonl } from "../../src/shared/artifacts.ts";
+import {
+	createJsonlWriter,
+	type DrainableSource,
+	type JsonlWriteStream,
+} from "../../src/shared/jsonl-writer.ts";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+	while (tempDirs.length > 0) {
+		const dir = tempDirs.pop();
+		if (!dir) continue;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
 
 class MockSource implements DrainableSource {
 	paused = 0;
@@ -115,5 +133,32 @@ describe("createJsonlWriter", () => {
 		writer.writeLine(line);
 		writer.writeLine(line);
 		assert.equal(stream.writes.length, 2);
+	});
+});
+
+describe("appendJsonl", () => {
+	it("writes one truncation marker after maxBytes is exceeded", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-append-jsonl-"));
+		tempDirs.push(dir);
+		const filePath = path.join(dir, "events.jsonl");
+		appendJsonl(filePath, '{"type":"a"}', {
+			maxBytes: 30,
+			truncationLine: '{"type":"truncated"}',
+		});
+		appendJsonl(filePath, '{"type":"b"}', {
+			maxBytes: 30,
+			truncationLine: '{"type":"truncated"}',
+		});
+		appendJsonl(filePath, '{"type":"c"}', {
+			maxBytes: 30,
+			truncationLine: '{"type":"truncated"}',
+		});
+
+		assert.deepEqual(fs.readFileSync(filePath, "utf-8").trim().split("\n"), [
+			'{"type":"a"}',
+			'{"type":"b"}',
+			'{"type":"truncated"}',
+		]);
+		assert.equal(fs.existsSync(`${filePath}.truncated`), true);
 	});
 });

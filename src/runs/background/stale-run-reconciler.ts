@@ -1,7 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
+import { appendJsonl as appendBoundedJsonl } from "../../shared/artifacts.ts";
 import { RESULTS_DIR, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode } from "../../shared/types.ts";
+import { DEFAULT_ASYNC_EVENT_LOG_MAX_BYTES } from "./async-retention.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent, type NestedRoute } from "../shared/nested-events.ts";
 
@@ -50,7 +52,14 @@ function isNotFoundError(error: unknown): boolean {
 
 function appendJsonl(filePath: string, payload: object): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf-8");
+	appendBoundedJsonl(filePath, JSON.stringify(payload), {
+		maxBytes: DEFAULT_ASYNC_EVENT_LOG_MAX_BYTES,
+		truncationLine: JSON.stringify({
+			type: "subagent.events.truncated",
+			ts: Date.now(),
+			maxBytes: DEFAULT_ASYNC_EVENT_LOG_MAX_BYTES,
+		}),
+	});
 }
 
 function readStatusFile(asyncDir: string): AsyncStatus | null {
@@ -60,16 +69,12 @@ function readStatusFile(asyncDir: string): AsyncStatus | null {
 		content = fs.readFileSync(statusPath, "utf-8");
 	} catch (error) {
 		if (isNotFoundError(error)) return null;
-		throw new Error(`Failed to read async status file '${statusPath}': ${getErrorMessage(error)}`, {
-			cause: error instanceof Error ? error : undefined,
-		});
+		throw new Error(`Failed to read async status file '${statusPath}': ${getErrorMessage(error)}`);
 	}
 	try {
 		return JSON.parse(content) as AsyncStatus;
 	} catch (error) {
-		throw new Error(`Failed to parse async status file '${statusPath}': ${getErrorMessage(error)}`, {
-			cause: error instanceof Error ? error : undefined,
-		});
+		throw new Error(`Failed to parse async status file '${statusPath}': ${getErrorMessage(error)}`);
 	}
 }
 
@@ -95,9 +100,7 @@ function readResultRepairData(resultPath: string): ResultRepairData | undefined 
 		return { state, ...(Array.isArray(data.results) ? { results: data.results } : {}) };
 	} catch (error) {
 		if (isNotFoundError(error)) return undefined;
-		throw new Error(`Failed to read async result file '${resultPath}': ${getErrorMessage(error)}`, {
-			cause: error instanceof Error ? error : undefined,
-		});
+		throw new Error(`Failed to read async result file '${resultPath}': ${getErrorMessage(error)}`);
 	}
 }
 

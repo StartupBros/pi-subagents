@@ -70,6 +70,7 @@ import {
 } from "../shared/worktree.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
+import { DEFAULT_ASYNC_EVENT_LOG_MAX_BYTES } from "./async-retention.ts";
 
 interface SubagentRunConfig {
 	id: string;
@@ -114,6 +115,21 @@ interface StepResult {
 }
 
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
+
+function appendAsyncEventLine(eventsPath: string, line: string): void {
+	appendJsonl(eventsPath, line, {
+		maxBytes: DEFAULT_ASYNC_EVENT_LOG_MAX_BYTES,
+		truncationLine: JSON.stringify({
+			type: "subagent.events.truncated",
+			ts: Date.now(),
+			maxBytes: DEFAULT_ASYNC_EVENT_LOG_MAX_BYTES,
+		}),
+	});
+}
+
+function appendAsyncEvent(eventsPath: string, payload: object): void {
+	appendAsyncEventLine(eventsPath, JSON.stringify(payload));
+}
 
 function findLatestSessionFile(sessionDir: string): string | null {
 	try {
@@ -255,16 +271,16 @@ function runPiStreaming(
 			}
 		};
 
-		const appendChildEvent = (event: Record<string, unknown>) => {
+		const appendChildEvent = (event: object) => {
 			if (!childEventContext) return;
-			appendJsonl(childEventContext.eventsPath, JSON.stringify({
+			appendAsyncEvent(childEventContext.eventsPath, {
 				...event,
 				subagentSource: "child",
 				subagentRunId: childEventContext.runId,
 				subagentStepIndex: childEventContext.stepIndex,
 				subagentAgent: childEventContext.agent,
 				observedAt: Date.now(),
-			}));
+			});
 		};
 
 		const appendChildLine = (type: "subagent.child.stdout" | "subagent.child.stderr", line: string) => {
@@ -802,7 +818,7 @@ function markParallelGroupSetupFailure(input: {
 	input.statusPayload.lastUpdate = input.failedAt;
 	input.statusPayload.outputFile = path.join(input.asyncDir, `output-${input.groupStartFlatIndex}.log`);
 	writeAtomicJson(input.statusPath, input.statusPayload);
-	appendJsonl(input.eventsPath, JSON.stringify({
+	appendAsyncEventLine(input.eventsPath, JSON.stringify({
 		type: "subagent.parallel.completed",
 		ts: input.failedAt,
 		runId: input.runId,
@@ -838,7 +854,7 @@ function markParallelGroupRunning(input: {
 	input.statusPayload.lastUpdate = input.groupStartTime;
 	input.statusPayload.outputFile = path.join(input.asyncDir, `output-${input.groupStartFlatIndex}.log`);
 	writeAtomicJson(input.statusPath, input.statusPayload);
-	appendJsonl(input.eventsPath, JSON.stringify({
+	appendAsyncEventLine(input.eventsPath, JSON.stringify({
 		type: "subagent.parallel.started",
 		ts: input.groupStartTime,
 		runId: input.runId,
@@ -999,7 +1015,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			? controlConfig.notifyChannels.filter((channel) => channel !== "intercom")
 			: controlConfig.notifyChannels;
 		if (channels.length === 0 || !claimControlNotification(controlConfig, event, emittedControlEventKeys, childIntercomTarget)) return;
-		appendJsonl(eventsPath, JSON.stringify({
+		appendAsyncEventLine(eventsPath, JSON.stringify({
 			type: "subagent.control",
 			event,
 			channels,
@@ -1236,7 +1252,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}
 		}
 		writeStatusPayload();
-		appendJsonl(eventsPath, JSON.stringify({
+		appendAsyncEventLine(eventsPath, JSON.stringify({
 			type: "subagent.run.paused",
 			ts: now,
 			runId: id,
@@ -1244,7 +1260,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		activeChildInterrupt?.();
 	};
 	process.on(ASYNC_INTERRUPT_SIGNAL, interruptRunner);
-	appendJsonl(
+	appendAsyncEventLine(
 		eventsPath,
 		JSON.stringify({
 			type: "subagent.run.started",
@@ -1347,7 +1363,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							statusPayload.steps[fi].activityState = undefined;
 							statusPayload.lastUpdate = skippedAt;
 							writeStatusPayload();
-							appendJsonl(eventsPath, JSON.stringify({
+							appendAsyncEventLine(eventsPath, JSON.stringify({
 								type: "subagent.step.failed", ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent, exitCode: -1, durationMs: 0,
 							}));
 							return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
@@ -1368,7 +1384,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.lastUpdate = taskStartTime;
 						writeStatusPayload();
 
-						appendJsonl(eventsPath, JSON.stringify({
+						appendAsyncEventLine(eventsPath, JSON.stringify({
 							type: "subagent.step.started", ts: taskStartTime, runId: id, stepIndex: fi, agent: task.agent,
 						}));
 
@@ -1413,7 +1429,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.lastUpdate = taskEndTime;
 						writeStatusPayload();
 
-						appendJsonl(eventsPath, JSON.stringify({
+						appendAsyncEventLine(eventsPath, JSON.stringify({
 							type: singleResult.exitCode === 0 ? "subagent.step.completed" : "subagent.step.failed",
 							ts: taskEndTime, runId: id, stepIndex: fi, agent: task.agent,
 							exitCode: singleResult.exitCode, durationMs: taskDuration,
@@ -1485,7 +1501,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				);
 				previousOutput = appendParallelWorktreeSummary(previousOutput, worktreeSetup, asyncDir, stepIndex, group);
 
-				appendJsonl(eventsPath, JSON.stringify({
+				appendAsyncEventLine(eventsPath, JSON.stringify({
 					type: "subagent.parallel.completed",
 					ts: Date.now(),
 					runId: id,
@@ -1515,7 +1531,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.outputFile = path.join(asyncDir, `output-${flatIndex}.log`);
 			writeStatusPayload();
 
-			appendJsonl(eventsPath, JSON.stringify({
+			appendAsyncEventLine(eventsPath, JSON.stringify({
 				type: "subagent.step.started",
 				ts: stepStartTime,
 				runId: id,
@@ -1596,7 +1612,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.lastUpdate = stepEndTime;
 			writeStatusPayload();
 
-			appendJsonl(eventsPath, JSON.stringify({
+			appendAsyncEventLine(eventsPath, JSON.stringify({
 				type: singleResult.exitCode === 0 ? "subagent.step.completed" : "subagent.step.failed",
 				ts: stepEndTime,
 				runId: id,
@@ -1697,7 +1713,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		}
 	}
 	writeStatusPayload();
-	appendJsonl(
+	appendAsyncEventLine(
 		eventsPath,
 		JSON.stringify({
 			type: "subagent.run.completed",
